@@ -61,15 +61,21 @@ describe('mock provider', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.name).toBe('plan');
     const steps = (calls[0]!.args as { steps: Array<{ files: string[] }> }).steps;
-    expect(steps).toHaveLength(4);
+    expect(steps).toHaveLength(6);
     const files = steps.flatMap((s) => s.files);
-    expect(files).toEqual(expect.arrayContaining(['index.html', 'styles.css', 'app.js', 'README.md']));
+    expect(files).toEqual(
+      expect.arrayContaining(['index.html', 'styles.css', 'animations.css', 'app.js', 'README.md'])
+    );
   });
 
   it('design/copy/builder return real site files in the tool convention', async () => {
     const p = createMockProvider();
+    // The design role writes both stylesheets in one response.
+    const designOut = await p.complete([{ role: 'system', content: '[role:design]' }]);
+    const designCalls = extractToolCalls(designOut).calls;
+    expect(designCalls.map((c) => c.args.path)).toEqual(['styles.css', 'animations.css']);
+    expect(designCalls[0]!.args.content as string).toContain('--color-accent');
     const cases: Array<[string, string, string]> = [
-      ['design', 'styles.css', '--color-accent'],
       ['copy', 'index.html', '<!doctype html>'],
       ['builder', 'app.js', 'addEventListener'],
     ];
@@ -310,9 +316,11 @@ describe('agent runtime', () => {
     const r2 = await rt.run(messages, { onEvent });
     expect(r2.status).toBe('awaiting-approval');
     expect(r2.plan).not.toBeNull();
-    expect(r2.plan!.steps).toHaveLength(4);
+    expect(r2.plan!.steps).toHaveLength(6);
     const files = r2.plan!.steps.flatMap((s) => s.files);
-    expect(files).toEqual(expect.arrayContaining(['index.html', 'styles.css', 'app.js', 'README.md']));
+    expect(files).toEqual(
+      expect.arrayContaining(['index.html', 'styles.css', 'animations.css', 'app.js', 'README.md'])
+    );
     expect(events.some((e) => e.type === 'plan')).toBe(true);
   });
 

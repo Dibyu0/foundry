@@ -166,18 +166,24 @@ describe('orchestrator lifecycle (real mock provider, real store, real hub)', ()
     await waitFor(() => w.orchestrator.get(id)?.phase === 'PLANNED', 'plan');
     const planned = w.orchestrator.get(id);
     expect(typeof planned?.plan?.summary).toBe('string');
-    expect((planned?.plan?.steps as unknown[] | undefined)?.length).toBe(4);
+    expect((planned?.plan?.steps as unknown[] | undefined)?.length).toBe(6);
 
     w.orchestrator.approve(id);
     await waitFor(() => w.orchestrator.get(id)?.phase === 'DONE', 'done', 20_000);
 
     const state = w.orchestrator.get(id);
     expect(state?.siteUrl).toBe(`/preview/${id}/`);
-    expect(state?.files.map((f) => f.path).sort()).toEqual(['app.js', 'index.html', 'styles.css']);
+    expect(state?.files.map((f) => f.path).sort()).toEqual([
+      'README.md',
+      'animations.css',
+      'app.js',
+      'index.html',
+      'styles.css'
+    ]);
 
     // Files really landed in the confined store on disk.
     const onDisk = (await listSiteFiles(w.sitesRoot, id)).map((e) => e.path).sort();
-    expect(onDisk).toEqual(['app.js', 'index.html', 'styles.css']);
+    expect(onDisk).toEqual(['README.md', 'animations.css', 'app.js', 'index.html', 'styles.css']);
     expect((await readSiteFile(w.sitesRoot, id, 'styles.css')).toString('utf8')).toContain(':root');
     expect((await readSiteFile(w.sitesRoot, id, 'index.html')).toString('utf8')).toContain('<main');
 
@@ -487,7 +493,14 @@ describe('agent routes', () => {
       const doneState = (await (await fetch(`${base}/api/builds/${id}`)).json()) as BuildState;
       expect(doneState.phase).toBe('DONE');
       expect(doneState.siteUrl).toBe(`/preview/${id}/`);
-      expect(doneState.files.map((f) => f.path).sort()).toEqual(['app.js', 'index.html', 'styles.css']);
+      // The edited plan had no README.md; the design pass always ships its
+      // two stylesheets, so exactly these four files land.
+      expect(doneState.files.map((f) => f.path).sort()).toEqual([
+        'animations.css',
+        'app.js',
+        'index.html',
+        'styles.css'
+      ]);
 
       const cancelRes = await post(`/api/builds/${id}/cancel`, {});
       expect(cancelRes.status).toBe(200);

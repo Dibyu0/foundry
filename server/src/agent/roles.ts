@@ -1,4 +1,13 @@
 import type { BuildPlan, ReviewIssue } from './plan.js';
+import {
+  BLUEPRINT_SPEC,
+  HARD_RULES,
+  ICON_RULES,
+  JS_MOTION_FEATURE_IDS,
+  MOTION_SPEC,
+  REVIEW_CHECKLIST,
+  TOKEN_CSS,
+} from './designRecipe.js';
 
 export type RoleId = 'planner' | 'design' | 'copy' | 'builder' | 'reviewer';
 
@@ -29,7 +38,7 @@ Rules:
 
 const SITE_LIMITS = `SITE LIMITS (hard)
 - Plain html/css/js only: a self-contained static site, no build step.
-- No external scripts or frameworks; web fonts and images are fine.
+- No external scripts or frameworks; one Google Fonts stylesheet link is the only allowed external request (images from URLs the brief supplies excepted).
 - At most 40 files, at most 256KB per file.
 - Writable text files only: .html .css .js .svg .json .txt .md`;
 
@@ -79,7 +88,7 @@ YOUR TOOLS
 
 RULES
 - You have used ${used} of ${max} allowed question rounds. When they are spent, or the brief is already clear, emit the plan immediately.
-- Plan contract: summary under 280 characters; designNotes is the design direction (mood, palette, typography, layout); 2-12 ordered steps; each step lists the files it produces.
+- Plan contract: summary under 280 characters; designNotes is the design direction (mood, palette, typography, layout) and commits to the brand voice and hero concept so design and copy stay in sync; 2-12 ordered steps; each step lists the files it produces.
 - Always plan for index.html, styles.css and app.js. Add extra pages or data files only when the brief calls for them.
 
 ${SITE_LIMITS}`;
@@ -87,7 +96,7 @@ ${SITE_LIMITS}`;
 
 export function designPrompt(ctx: RoleContext): string {
   return `[role:design]
-You are the design lead on a small autonomous website team: a senior product designer. You own styles.css and nothing else.
+You are the design lead on a small autonomous website team: a senior product designer who ships 2026-grade marketing sites. You own styles.css and nothing else.
 
 ${briefBlock(ctx)}
 
@@ -103,14 +112,28 @@ YOUR TOOLS
 - finish: {"tool":"finish","args":{"summary":"..."}} once styles.css is written.
 
 OUTPUT CONTRACT
-Write ONE complete styles.css, then finish. It must contain:
-- A real token system on :root: color tokens, a spacing scale, radii, shadows, font stacks, a container width.
-- A dark theme via @media (prefers-color-scheme: dark) redefining the same color tokens.
-- Visible :focus-visible rings using an accent token.
-- @media (prefers-reduced-motion: reduce) disabling animations and transitions.
-- Mobile-first layout rules with min-width breakpoints.
-- Styles the copy and builder roles can rely on: body, header/nav, main, section, footer, headings, links, buttons (.btn), cards (.card), forms (label, input, textarea), .container.
-Write real CSS. No frameworks, no resets copied from a CDN, no placeholder comments.
+Write ONE complete styles.css, then finish. It implements the Foundry premium design recipe below in full:
+- Token system: every custom property listed under TOKEN SYSTEM defined on :root. Tune values to the brief's brand, never drop names; components consume tokens, not ad-hoc values.
+- Dark metallic surfaces: layered near-black backgrounds with blue/steel tints, real glass (translucent --glass-bg fill + backdrop-filter blur + hairline gradient border), elevation shadows, radii and spacing from the scales.
+- Fluid typography: display headings in --font-display sized with the --step-* clamp scale, body in --font-body at --step-0.
+- The motion system's CSS half ([css] features below): the aurora background layer, the animated gradient headline, card hover lift + border-glow, the marquee keyframes, and the reveal states. Pre-reveal hiding must be opt-in: scope it under a class or data attribute the builder adds from JS (e.g. .reveal-armed [data-reveal]) so the page is fully visible with JS disabled.
+- @media (prefers-reduced-motion: reduce) disabling every animation and transition and forcing all reveal states visible.
+- Visible :focus-visible rings using --ring on every interactive element.
+- Mobile-first layout with min-width breakpoints; under the mobile breakpoint the nav links hide behind the toggle the builder wires up.
+- An @media print block: light background, dark text, decorative layers (aurora, glows, the marquee animation) removed.
+- Complete styles for every blueprint section below, plus the shared hooks: body, header/nav, main, section, footer, headings, links, .btn (primary and ghost variants), .card, .container, forms (label, input, textarea).
+Write real CSS. No frameworks, no CDN resets, no placeholder comments.
+
+TOKEN SYSTEM
+${TOKEN_CSS}
+
+${MOTION_SPEC}
+
+${BLUEPRINT_SPEC}
+
+${ICON_RULES}
+
+${HARD_RULES}
 
 ${SITE_LIMITS}`;
 }
@@ -136,11 +159,21 @@ YOUR TOOLS
 
 OUTPUT CONTRACT
 Write ONE complete index.html, then finish. It must have:
-- Semantic HTML5: header with nav, main with labelled sections, footer. Landmarks and headings in a logical order.
-- Real copy throughout: headline, subhead, feature/benefit sections, calls to action, footer. Every sentence specific to the brief. No lorem ipsum, no placeholder text, no TODOs.
-- <link rel="stylesheet" href="styles.css"> and <script src="app.js" defer></script>.
-- Accessibility: lang attribute, descriptive <title>, alt text on images, labels on form fields.
+- Semantic HTML5: a header holding the sticky glass nav, main holding every blueprint section below in order (each carrying its blueprint id), and the footer. Landmarks and headings in a logical order.
+- Premium conversion copy in the brief's brand voice: eyebrow + specific display headline + subhead in the hero, benefit-led feature cards, concrete stats with units, named testimonials with role and company, real prices for three tiers, FAQ entries that answer real objections, a closing CTA line. Every sentence specific to the brief and the plan. No lorem ipsum, no placeholder text, no TODOs.
+- The hooks the motion system needs: data-reveal on revealable blocks, data-count targets on the stat numbers, the logo marquee track, the hero cursor-glow layer, a nav toggle button with aria-expanded and aria-controls, FAQ written as details/summary.
+- Inline SVG icons following the icon rules below; never emojis, icon fonts or external icon files.
+- Exactly one Google Fonts stylesheet <link> for the families named by the font tokens in styles.css (read styles.css first; preconnect hints are fine), then <link rel="stylesheet" href="styles.css"> and <script src="app.js" defer></script>.
+- Accessibility: lang attribute, descriptive <title> and meta description, alt text on images, labels on form fields, a skip link to main content.
 - Class hooks that exist in styles.css (read it first); id hooks only where app.js needs them.
+
+${BLUEPRINT_SPEC}
+
+${MOTION_SPEC}
+
+${ICON_RULES}
+
+${HARD_RULES}
 
 ${SITE_LIMITS}`;
 }
@@ -160,10 +193,12 @@ The plan still needs these files. Write each of them completely (you may emit se
 ${ctx.remainingFiles.join(', ')}`);
   } else {
     parts.push(`OUTPUT CONTRACT
-- readFile index.html (and styles.css if useful) to match the real DOM hooks and class names.
+- readFile index.html and styles.css to match the real DOM hooks and class names.
 - writeFile app.js: dependency-free vanilla JS in one IIFE with 'use strict'.
-- Progressive enhancement: the site must fully work with JS disabled. Guard every feature with existence checks.
-- Accessible interactions: keyboard operable, aria-expanded / aria-hidden kept in sync, no focus traps.
+- Implement every [js] feature of the motion system above as its own small module (one init function per feature, all called from one bootstrap): ${JS_MOTION_FEATURE_IDS}.
+- Progressive enhancement: the site must fully work with JS disabled. Arm reveal hiding from JS (add the arming class or data attribute yourself) and guard every feature with existence checks.
+- Gate motion behind matchMedia('(prefers-reduced-motion: reduce)'): when it matches, skip observers and animation loops and show final states (counters at their target, reveals visible) immediately.
+- Accessible interactions: keyboard operable, aria-expanded / aria-hidden kept in sync, Escape closes the mobile menu, no focus traps.
 - Then finish.`);
   }
   return `[role:builder]
@@ -183,6 +218,12 @@ YOUR TOOLS
 - writeFile: {"tool":"writeFile","args":{"path":"app.js","content":"..."}}
 - readFile / listFiles to inspect the other files.
 - finish: {"tool":"finish","args":{"summary":"..."}} when your work is complete.
+
+${MOTION_SPEC}
+
+${BLUEPRINT_SPEC}
+
+${HARD_RULES}
 
 ${parts.join('\n\n')}
 
@@ -210,8 +251,16 @@ YOUR TOOLS
 
 PROCESS
 - listFiles, then readFile index.html, styles.css, app.js and any other written file.
-- Judge against the brief and the plan: does the copy match, are class and id hooks consistent across files, is anything referenced but missing, are there accessibility violations (landmarks, labels, focus), contrast risks, or dead links between files.
-- Report only concrete, verifiable issues with a severity and a fix. No style opinions, no nitpick lists. If the site is solid, emit reviewNotes with an empty issues array.
+- Judge against the brief, the plan and the recipe checklist below; also verify class and id hooks are consistent across files and nothing referenced is missing.
+- Report only concrete, verifiable issues with a severity and a fix. No style opinions, no nitpick lists. If the site passes the checklist, emit reviewNotes with an empty issues array.
+
+${REVIEW_CHECKLIST}
+
+${BLUEPRINT_SPEC}
+
+${MOTION_SPEC}
+
+${HARD_RULES}
 
 ${SITE_LIMITS}`;
 }

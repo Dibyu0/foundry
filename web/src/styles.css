@@ -854,7 +854,20 @@ select.input {
   display: flex;
   justify-content: space-between;
   gap: var(--sp-3);
-  padding: 1px 0;
+  padding: 1px var(--sp-1);
+  border-radius: var(--radius-s);
+  animation: ff-flash 900ms ease-out;
+}
+
+/* runs on mount, so only newly appended rows flash; the global
+   prefers-reduced-motion rule collapses this to an instant no-op */
+@keyframes ff-flash {
+  from {
+    background: rgba(255, 122, 69, 0.24);
+  }
+  to {
+    background: transparent;
+  }
 }
 
 .ff-path {
@@ -1008,15 +1021,19 @@ select.input {
 }
 
 .seg-btn {
-  padding: 4px var(--sp-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 24px;
+  padding: 0;
   border: none;
   border-right: 1px solid var(--border-0);
   background: transparent;
   color: var(--text-2);
   font: inherit;
-  font-family: var(--font-mono);
-  font-size: 11px;
   cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
 }
 
 .seg-btn:last-child {
@@ -1033,11 +1050,30 @@ select.input {
 }
 
 .preview-url {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 2px var(--sp-3);
+  border: 1px solid var(--border-0);
+  border-radius: 99px;
+  background: var(--bg-0);
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.url-lock {
+  flex: 0 0 auto;
+  color: var(--ok);
+}
+
+.url-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-mono);
-  font-size: 11px;
 }
 
 .preview-stage {
@@ -1046,20 +1082,45 @@ select.input {
   display: flex;
   justify-content: center;
   overflow: auto;
+  padding: var(--sp-3);
   background:
     repeating-conic-gradient(var(--bg-1) 0% 25%, var(--bg-0) 0% 50%) 0 0 / 24px 24px;
   position: relative;
 }
 
-.preview-frame {
-  border: none;
-  background: #fff;
+.preview-browser {
+  display: flex;
+  flex-direction: column;
   height: 100%;
+  min-height: 0;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-l);
+  overflow: hidden;
+  background: #fff;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.45);
 }
 
-.w--mobile .preview-frame { width: 390px; }
-.w--tablet .preview-frame { width: 768px; max-width: 100%; }
-.w--desktop .preview-frame { width: 100%; }
+.preview-chrome {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 4px var(--sp-2);
+  border-bottom: 1px solid var(--border-0);
+  background: var(--bg-2);
+}
+
+.preview-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: none;
+  background: #fff;
+}
+
+.w--mobile .preview-browser { width: 390px; max-width: 100%; }
+.w--tablet .preview-browser { width: 768px; max-width: 100%; }
+.w--desktop .preview-browser { width: 100%; }
 
 .preview-loading {
   position: absolute;
@@ -1072,6 +1133,105 @@ select.input {
   background: var(--bg-2);
   font-size: 11px;
   z-index: 1;
+}
+
+/* --------------------------------------------------------- done summary */
+
+.done-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-5);
+  background: rgba(11, 13, 16, 0.66);
+  backdrop-filter: blur(3px);
+}
+
+.done-card {
+  width: min(400px, 100%);
+  padding: var(--sp-5) var(--sp-5) var(--sp-4);
+  border: 1px solid rgba(63, 206, 139, 0.35);
+  border-radius: var(--radius-l);
+  background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+  box-shadow: 0 20px 54px rgba(0, 0, 0, 0.55);
+  text-align: center;
+  animation: done-in 280ms cubic-bezier(0.2, 0.9, 0.25, 1);
+}
+
+@keyframes done-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.done-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ok);
+}
+
+.done-title {
+  margin: var(--sp-2) 0 var(--sp-3);
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-0);
+}
+
+.done-stats {
+  display: flex;
+  justify-content: center;
+  gap: var(--sp-5);
+  margin-bottom: var(--sp-4);
+}
+
+.done-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.done-stat-value {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-0);
+}
+
+.done-stat-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-1);
+}
+
+.done-actions {
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.done-open {
+  justify-content: center;
+  padding: 9px var(--sp-4);
+  font-size: 14px;
+}
+
+.done-actions-row {
+  display: flex;
+  justify-content: center;
+  gap: var(--sp-2);
 }
 
 /* ----------------------------------------------------------------- code */

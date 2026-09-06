@@ -1,16 +1,20 @@
 # Foundry
 
-**A self-hosted agentic website builder.** Describe the website you want; a
-team of AI agents asks clarifying questions, drafts a plan, builds a real
-site into a confined store on this machine, and serves a live preview plus a
-zip download. The cloud is this box.
+**A self-hosted agentic website builder.** Describe the site you want in one
+sentence and a five-role AI team — planner, designer, copywriter, builder,
+reviewer — takes it from there, steered by a shared premium design recipe: it
+asks you a few sharp questions, drafts a plan you can edit, then writes a
+complete website on this machine while you watch every file land in real
+time. The result is not a wireframe and not a framework project with a
+toolchain to babysit: it is a self-contained static site with award-tier
+aesthetics — metallic dark palettes, glass surfaces, a real motion system —
+that previews instantly in a sandboxed frame and downloads as a zip you can
+deploy anywhere. The cloud is this box.
 
 Foundry is a single-user, Replit-class builder you run yourself. Every build
 flows through a visible pipeline — intake, planning, build, review — and you
 stay in the loop: answer the agents' questions, approve or edit the plan, then
-watch the files appear in real time. Output is a self-contained static site
-(plain HTML/CSS/JS), so anything it builds can be previewed instantly and
-deployed anywhere.
+watch the files appear in real time.
 
 ## Architecture
 
@@ -94,24 +98,43 @@ sites.
 write-only over the API: `GET /api/config` returns
 `{provider, endpoint, model, hasKey}` — never the key itself.
 
-## The agent team
+## What a build looks like
 
 Five role agents collaborate on every build, driven by an orchestrator that
 runs the phase machine, persists snapshots, and broadcasts live events. Each
 role is prompted with `[role:<name>]` so providers (including the mock) can
 specialize:
 
-- **Planner** — owns intake *and* planning: asks sharp clarifying questions
-  (at most 2 rounds), then turns brief + answers into an explicit, ordered
-  build plan you approve before any file is written.
-- **Designer** — picks the visual direction and writes `styles.css`: design
-  tokens, dark theme, focus rings, reduced motion, mobile-first layout.
-- **Copywriter** — writes `index.html` with real copy for every section (no
-  lorem ipsum), matching the designer's class hooks.
-- **Builder** — writes `app.js` and any extra planned files, then fixes
-  whatever the reviewer flags.
-- **Reviewer** — audits the finished site against the brief and site rules
-  like a pull request, and sends the builder back to fix what misses.
+| Role | What it owns |
+| --- | --- |
+| **Planner** | Intake *and* planning: asks sharp clarifying questions (at most 2 rounds), then turns brief + answers into an explicit, ordered build plan — committing to brand voice and hero concept — that you approve before any file is written. |
+| **Designer** | `styles.css`: the token system, metallic dark surfaces, real glass, fluid typography, the CSS half of the motion system, AA-checked contrast, mobile-first layout and print styles. |
+| **Copywriter** | `index.html`: every blueprint section in order with premium conversion copy (no lorem ipsum), inline SVG icons, and the DOM hooks the motion system needs. |
+| **Builder** | `app.js`: the JS half of the motion system (scroll reveals, stat count-ups, cursor glow, logo marquee) plus the mobile nav — progressive enhancement throughout — then fixes whatever the reviewer flags. |
+| **Reviewer** | A pull-request-style audit of the finished site against the brief and a hard recipe checklist; sends the builder back to fix what misses. |
+
+**The premium design recipe.** Every role is steered by one shared recipe,
+injected into its prompt, with a single bar: a site that looks designed, not
+generated.
+
+- **Metallic dark** — layered near-black surfaces with blue/steel tints,
+  brushed-metal gradient accents and one high-sheen accent color, kept
+  AA-legible across the whole palette.
+- **Glass** — frosted panels (translucent fill, backdrop blur, hairline
+  gradient borders) and layered elevation shadows, so the page has real depth.
+- **Motion system** — an aurora background layer, an animated gradient
+  headline, hover lift and border-glow on cards, scroll-triggered reveals,
+  counting stats, a cursor-following hero glow and a logo marquee; transform
+  and opacity only, all of it instant or disabled under
+  `prefers-reduced-motion`, and the page stays complete with JS disabled.
+- **Blueprint sections** — a proven landing skeleton the team fills with
+  brief-specific content: sticky glass nav, hero, logo marquee, features
+  grid, stats band, showcase split, testimonials, pricing, FAQ, closing CTA
+  and footer.
+
+The constraints stay hard: self-contained static HTML/CSS/JS with zero build
+step, no external scripts or frameworks, AA contrast on the dark palette, and
+fully responsive pages with a working mobile nav.
 
 Pipeline phases, visible live in the UI and over the SSE stream:
 
@@ -141,7 +164,7 @@ Foundry is built to be safe to run on your own machine and network:
   stay inside `data/sites/<id>/`. `..` segments, absolute paths, and symlink
   escapes are refused.
 - **Hard output caps:** at most 40 files per site, at most 256 KB per file,
-  plain html/css/js only, no build step, no external scripts.
+  static html/css/js only, no build step, no external scripts.
 - **No shell execution anywhere.** Agents can only write files through the
   tool vocabulary; there is no `exec`, no eval of generated code, no template
   execution.
@@ -221,8 +244,10 @@ redirect. It prints a PASS/FAIL summary and exits non-zero on any failure.
 - **Single-user.** No accounts, no multi-tenancy, no per-user isolation.
 - **In-memory build registry** with JSON snapshots: fine for a personal
   tool, not for durability guarantees.
-- **Output is plain html/css/js only** — no build tools, no frameworks, no
-  external scripts. Fonts and images from CDNs are allowed.
+- **Output is static html/css/js only.** Builds are self-contained sites
+  with premium aesthetics and zero build step, but there are no frameworks,
+  no build tools and no external scripts. Fonts and images from CDNs are
+  allowed.
 - **Mock provider is for demos.** It proves the pipeline end-to-end without
   network access, but it doesn't write real sites.
 
@@ -232,6 +257,9 @@ redirect. It prints a PASS/FAIL summary and exits non-zero on any failure.
   the whole site.
 - **Auth is a hook away** — the middleware seam is there; wire your SSO,
   basic auth, or proxy-level auth in front of `/api/*`.
+- **React/Next.js project output is a future option** — it needs a sandboxed
+  build runner, which is out of scope for the static-preview model: generated
+  sites are served, never executed on this box.
 - **Container sandboxing for running generated apps** (servers, databases)
   is **out of scope by design**: Foundry builds static sites, and static
   sites never execute on this box.

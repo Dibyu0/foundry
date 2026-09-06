@@ -645,6 +645,14 @@ export class Orchestrator {
         changed.push({ ...prev });
       }
     }
+    // Emit in plan order so files appear the way the plan announced them;
+    // files outside the plan fall back to alphabetical after the planned ones.
+    const planned = b.plan !== undefined ? planFiles(b.plan) : [];
+    const rank = (p: string): number => {
+      const i = planned.indexOf(p);
+      return i === -1 ? planned.length : i;
+    };
+    changed.sort((x, y) => rank(x.path) - rank(y.path) || x.path.localeCompare(y.path));
     for (const f of changed) this.emit(b, { type: 'file', file: f });
     if (changed.length > 0) this.persist(b);
   }
