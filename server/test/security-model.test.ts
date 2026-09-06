@@ -59,7 +59,7 @@ describe('config route: key hygiene', () => {
     const text = await res.text();
     expect(text).not.toContain(CANARY);
     const body = JSON.parse(text) as Record<string, unknown>;
-    expect(Object.keys(body).sort()).toEqual(['endpoint', 'hasKey', 'model', 'provider']);
+    expect(Object.keys(body).sort()).toEqual(['endpoint', 'hasKey', 'model', 'perRoleModels', 'provider']);
     expect(body.hasKey).toBe(true);
   });
 

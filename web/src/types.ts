@@ -106,6 +106,60 @@ export interface ServerConfig {
 
 export type StreamStatus = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'lost';
 
+/* ------------------------------------------------------------------ */
+/* Follow-up actions on an existing build (new endpoints).            */
+/* ------------------------------------------------------------------ */
+
+/** POST /api/builds/:id/edit */
+export interface EditRequest {
+  instruction: string;
+}
+
+/** POST /api/builds/:id/fixError */
+export interface FixErrorRequest {
+  message: string;
+  file?: string;
+  line?: number;
+}
+
+/** GET /api/builds/:id/checkpoints (list item). */
+export interface Checkpoint {
+  id: string;
+  label?: string;
+  createdAt?: number;
+  fileCount?: number;
+}
+
+/** GET /api/builds/:id/share */
+export interface ShareLink {
+  url: string;
+  id?: string;
+}
+
+/** POST /api/enhance-prompt */
+export interface EnhancePromptRequest {
+  draft: string;
+}
+
+export interface EnhancePromptResponse {
+  enhanced: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Composer: @-mentions and the prompt queue.                         */
+/* ------------------------------------------------------------------ */
+
+/** 'site' and 'preview' are specials that always exist; 'file' is a build file. */
+export type MentionKind = 'file' | 'site' | 'preview';
+
+export interface MentionItem {
+  kind: MentionKind;
+  /** File path for kind 'file', otherwise the special name ('site' | 'preview'). */
+  label: string;
+}
+
+/* The prompt-queue state and reducers live in ./lib/pure (WEBTYPES). */
+
 export type BuildEvent =
   | { type: 'phase'; phase: Phase }
   | { type: 'message'; message: ChatMessage }

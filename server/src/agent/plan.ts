@@ -23,6 +23,24 @@ export interface BuildPlan {
   summary: string;
   steps: PlanStep[];
   designNotes?: string;
+  /** Multi-page sites: the html pages to generate (index.html first). */
+  pages?: string[];
+}
+
+/** Sanitize a model-supplied pages array into writable .html paths. */
+function normalizePages(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue;
+    const p = sanitizeSitePath(entry.endsWith('.html') ? entry : `${entry}.html`);
+    if (p === null || !isWritableSiteFile(p) || seen.has(p)) continue;
+    seen.add(p);
+    out.push(p);
+    if (out.length >= 8) break;
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 /** Review issue in the client-facing shape (web/src/types.ts ReviewIssue). */
@@ -96,6 +114,8 @@ export function normalizePlan(raw: unknown): BuildPlan | null {
   const plan: BuildPlan = { summary, steps };
   const designNotes = asTrimmedString(o.designNotes ?? o.designDirection ?? o.design ?? o.direction, 2000);
   if (designNotes !== null) plan.designNotes = designNotes;
+  const pages = normalizePages(o.pages);
+  if (pages !== undefined) plan.pages = pages;
   return plan;
 }
 
@@ -111,11 +131,16 @@ export function applyPlanEdits(current: BuildPlan, edits: unknown): BuildPlan {
     summary: current.summary,
     steps: current.steps,
     ...(current.designNotes !== undefined ? { designNotes: current.designNotes } : {}),
+    ...(current.pages !== undefined ? { pages: current.pages } : {}),
   };
   const summary = asTrimmedString(o.summary, 500);
   if (summary !== null) merged.summary = summary;
   const designNotes = asTrimmedString(o.designNotes ?? o.designDirection ?? o.design ?? o.direction, 2000);
   if (designNotes !== null) merged.designNotes = designNotes;
+  if (Array.isArray(o.pages)) {
+    const pages = normalizePages(o.pages);
+    if (pages !== undefined) merged.pages = pages;
+  }
   if (Array.isArray(o.steps)) {
     const normalized = normalizePlan({ summary: merged.summary, steps: o.steps });
     if (normalized !== null && normalized.steps.length > 0) merged.steps = normalized.steps;

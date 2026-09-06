@@ -5,9 +5,11 @@ import { isRunning } from '../types';
 import { downloadUrl, previewUrl } from '../api';
 import { formatBytes } from '../format';
 import { CodeViewer } from './CodeViewer';
+import { ConsoleTab } from './ConsoleTab';
+import { InspectToggle, VisualEditorPanel, useInspectMode } from './VisualEditorPanel';
 import { Logo } from './Logo';
 
-type Tab = 'preview' | 'code';
+type Tab = 'preview' | 'code' | 'console';
 type Device = 'mobile' | 'tablet' | 'desktop';
 
 const DEVICES: { id: Device; hint: string; icon: ReactElement }[] = [
@@ -55,8 +57,12 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
   const [reloadKey, setReloadKey] = useState(0);
   const [frameLoaded, setFrameLoaded] = useState(false);
   const [cardDismissed, setCardDismissed] = useState(false);
+  const [consoleCount, setConsoleCount] = useState(0);
   const previewTabRef = useRef<HTMLButtonElement>(null);
   const codeTabRef = useRef<HTMLButtonElement>(null);
+  const consoleTabRef = useRef<HTMLButtonElement>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const inspect = useInspectMode(iframeRef);
   const buildId = build?.id;
   const phase = build?.phase;
   const prevPhaseRef = useRef<Phase | undefined>(phase);
@@ -78,9 +84,11 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
   function onTabKeyDown(e: React.KeyboardEvent) {
     if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
     e.preventDefault();
-    const next: Tab = tab === 'preview' ? 'code' : 'preview';
+    const order: Tab[] = ['preview', 'code', 'console'];
+    const i = order.indexOf(tab);
+    const next = order[(i + (e.key === 'ArrowRight' ? 1 : order.length - 1)) % order.length];
     setTab(next);
-    (next === 'preview' ? previewTabRef : codeTabRef).current?.focus();
+    (next === 'preview' ? previewTabRef : next === 'code' ? codeTabRef : consoleTabRef).current?.focus();
   }
 
   if (loading) {
@@ -144,6 +152,20 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
             Code
             {build.files.length > 0 && <span className="tab-count">{build.files.length}</span>}
           </button>
+          <button
+            type="button"
+            role="tab"
+            id="tab-console"
+            aria-selected={tab === 'console'}
+            aria-controls="panel-console"
+            tabIndex={tab === 'console' ? 0 : -1}
+            ref={consoleTabRef}
+            className="tab"
+            onClick={() => setTab('console')}
+          >
+            Console
+            {consoleCount > 0 && <span className="tab-count">{consoleCount}</span>}
+          </button>
         </div>
 
         <div className="workspace-actions">
@@ -184,6 +206,11 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
               </button>
             ))}
           </div>
+          {canPreview && (
+            <div className="seg" role="group" aria-label="Preview tools">
+              <InspectToggle active={inspect.active} onToggle={inspect.toggle} />
+            </div>
+          )}
         </div>
 
         {canPreview ? (
@@ -245,6 +272,7 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
               </div>
               <iframe
                 key={`${build.id}-${reloadKey}`}
+                ref={iframeRef}
                 className="preview-frame"
                 title="Built site preview"
                 /* opaque origin: the generated site runs scripts but cannot
@@ -254,6 +282,17 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
                 onLoad={() => setFrameLoaded(true)}
               />
             </div>
+
+            <VisualEditorPanel
+              buildId={build.id}
+              active={inspect.active}
+              iframeRef={iframeRef}
+              frameEpoch={`${build.id}-${reloadKey}`}
+              onEditSaved={() => {
+                setFrameLoaded(false);
+                setReloadKey((k) => k + 1);
+              }}
+            />
 
             {build.phase === 'DONE' && !cardDismissed && (
               <div className="done-overlay">
@@ -323,6 +362,16 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
         className="tabpanel"
       >
         <CodeViewer files={build.files} running={running} />
+      </div>
+
+      <div
+        role="tabpanel"
+        id="panel-console"
+        aria-labelledby="tab-console"
+        hidden={tab !== 'console'}
+        className="tabpanel"
+      >
+        <ConsoleTab buildId={build.id} onCountChange={setConsoleCount} />
       </div>
     </div>
   );

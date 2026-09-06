@@ -12,6 +12,10 @@ import { agentRouter } from './routes/agent.js';
 import { createConfigRouter } from './routes/config.js';
 import { createDownloadRouter } from './routes/download.js';
 import { createPreviewRouter } from './routes/preview.js';
+import { createCheckpointsRouter, type BuildRegistryLike } from './routes/checkpoints.js';
+import { createCheckpointService } from './agent/checkpoints.js';
+import { createShareApiRouter, createShareRouter } from './routes/share.js';
+import { enhanceRouter } from './routes/agent.js';
 
 export interface ServerOptions {
   dataRoot?: string;
@@ -74,6 +78,19 @@ export async function createServer(opts: ServerOptions = {}): Promise<FoundrySer
   app.use(rateLimit({ windowMs: 60_000, max: 300 }));
 
   const buildsPostLimit = rateLimit({ windowMs: 60_000, max: 60 });
+  // Checkpoint service: snapshots flow in from the orchestrator (published
+  // on app.locals by the agent router's lazy init).
+  const checkpointService = createCheckpointService({
+    dataDir: dataRoot,
+    sitesStore: dirs.sites,
+  });
+  app.locals.checkpointService = checkpointService;
+  // The orchestrator is built lazily on the first agent request and
+  // published on app.locals; until then the registry honestly reports
+  // "unknown build" (no builds can exist before init anyway).
+  const lazyBuildRegistry: BuildRegistryLike = {
+    get: (id: string) => app.locals.orchestrator?.get(id),
+  };
   app.use(
     '/api/builds',
     (req: Request, res: Response, next: NextFunction) => {
@@ -85,9 +102,18 @@ export async function createServer(opts: ServerOptions = {}): Promise<FoundrySer
     },
     express.json({ limit: '256kb' }),
     createDownloadRouter(dirs.sites),
+    createCheckpointsRouter({
+      sitesRoot: dirs.sites,
+      builds: lazyBuildRegistry,
+      service: checkpointService,
+      hub,
+    }),
+    createShareApiRouter(dirs.sites, { httpsPort }),
     agentRouter,
   );
+  app.use('/api/enhance-prompt', express.json({ limit: '64kb' }), enhanceRouter);
   app.use('/api/config', express.json({ limit: '64kb' }), createConfigRouter(dataRoot));
+  app.use('/p', createShareRouter(dirs.sites));
   app.use('/preview', createPreviewRouter(dirs.sites));
 
   app.use('/api', (_req: Request, res: Response) => {

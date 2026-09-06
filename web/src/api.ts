@@ -4,6 +4,9 @@ import type {
   BuildState,
   BuildSummary,
   ChatMessage,
+  Checkpoint,
+  EnhancePromptResponse,
+  FixErrorRequest,
   PendingQuestion,
   Phase,
   Plan,
@@ -11,6 +14,7 @@ import type {
   ReviewIssue,
   RoleState,
   ServerConfig,
+  ShareLink,
   SiteFile,
   StreamStatus,
 } from './types';
@@ -265,6 +269,21 @@ function normSummary(raw: unknown): BuildSummary | null {
   return out;
 }
 
+function normCheckpoint(raw: unknown): Checkpoint | null {
+  const c = rec(raw);
+  if (!c) return null;
+  const id = str(c.id) ?? str(c.checkpointId);
+  if (!id) return null;
+  const out: Checkpoint = { id };
+  const label = str(c.label) ?? str(c.name) ?? str(c.title);
+  if (label) out.label = label;
+  const createdAt = num(c.createdAt) ?? num(c.created) ?? num(c.ts);
+  if (createdAt) out.createdAt = createdAt;
+  const fileCount = num(c.fileCount) ?? num(c.files);
+  if (fileCount !== undefined) out.fileCount = fileCount;
+  return out;
+}
+
 /* ------------------------------------------------------------------ */
 /* REST wrappers                                                       */
 /* ------------------------------------------------------------------ */
@@ -318,12 +337,86 @@ export function postCancel(id: string): Promise<unknown> {
   return request(`/api/builds/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' });
 }
 
+/* ------------------------------------------------------------------ */
+/* Follow-up actions: edits, error fixes, pause/resume, checkpoints,  */
+/* share links and the prompt enhancer. Response bodies that the      */
+/* contract does not pin down are returned as unknown — callers       */
+/* normalize only what they actually read.                            */
+/* ------------------------------------------------------------------ */
+
+export function postEdit(id: string, instruction: string): Promise<unknown> {
+  return request(`/api/builds/${encodeURIComponent(id)}/edit`, {
+    method: 'POST',
+    body: JSON.stringify({ instruction }),
+  });
+}
+
+export function postFixError(id: string, payload: FixErrorRequest): Promise<unknown> {
+  return request(`/api/builds/${encodeURIComponent(id)}/fixError`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function postPause(id: string): Promise<unknown> {
+  return request(`/api/builds/${encodeURIComponent(id)}/pause`, { method: 'POST', body: '{}' });
+}
+
+export function postResume(id: string): Promise<unknown> {
+  return request(`/api/builds/${encodeURIComponent(id)}/resume`, { method: 'POST', body: '{}' });
+}
+
+export async function listCheckpoints(id: string): Promise<Checkpoint[]> {
+  const raw = await request<unknown>(`/api/builds/${encodeURIComponent(id)}/checkpoints`);
+  const list = Array.isArray(raw)
+    ? raw
+    : Array.isArray(rec(raw)?.checkpoints)
+      ? (rec(raw)?.checkpoints as unknown[])
+      : [];
+  return list.map(normCheckpoint).filter((c): c is Checkpoint => c !== null);
+}
+
+export function restoreCheckpoint(id: string, checkpointId: string): Promise<unknown> {
+  return request(
+    `/api/builds/${encodeURIComponent(id)}/checkpoints/${encodeURIComponent(checkpointId)}/restore`,
+    { method: 'POST', body: '{}' },
+  );
+}
+
+export async function getShare(id: string): Promise<ShareLink> {
+  const raw = await request<unknown>(`/api/builds/${encodeURIComponent(id)}/share`);
+  if (typeof raw === 'string' && raw.length > 0) return { url: raw };
+  const body = rec(raw);
+  const url = str(body?.url) ?? str(body?.shareUrl) ?? str(rec(body?.share)?.url);
+  if (!url) throw new ApiError(0, 'Server returned no share URL.');
+  const link: ShareLink = { url };
+  const linkId = str(body?.id);
+  if (linkId) link.id = linkId;
+  return link;
+}
+
+/** The published read-only page for a shared build. */
+export function sharePageUrl(id: string): string {
+  return `/p/${encodeURIComponent(id)}/`;
+}
+
+export async function enhancePrompt(draft: string): Promise<string> {
+  const raw = await request<unknown>('/api/enhance-prompt', {
+    method: 'POST',
+    body: JSON.stringify({ draft }),
+  });
+  const enhanced = str((rec(raw) as EnhancePromptResponse | undefined)?.enhanced);
+  if (!enhanced) throw new ApiError(0, 'Server returned no enhanced prompt.');
+  return enhanced;
+}
+
 export function previewUrl(id: string, siteUrl?: string): string {
   return siteUrl ?? `/preview/${encodeURIComponent(id)}/`;
 }
 
-export function downloadUrl(id: string): string {
-  return `/api/builds/${encodeURIComponent(id)}/download`;
+export function downloadUrl(id: string, format?: 'single'): string {
+  const base = `/api/builds/${encodeURIComponent(id)}/download`;
+  return format === undefined ? base : `${base}?format=${format}`;
 }
 
 /* ------------------------------------------------------------------ */

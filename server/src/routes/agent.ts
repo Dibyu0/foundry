@@ -5,6 +5,7 @@ import {
   createKimiProvider,
   createMockProvider,
   createOllamaProvider,
+  type ChatMessage,
   type Provider,
 } from '../agent/provider.js';
 import { readConfig, readKey } from '../config.js';
@@ -111,6 +112,47 @@ export function createAgentRouter(deps: AgentRouterDeps): Router {
     }),
   );
 
+  router.post(
+    '/:id/edit',
+    handle((req, res) => {
+      const body = bodyObject(req);
+      if (typeof body.instruction !== 'string') throw new ApiError(400, 'instruction must be a string');
+      res.json(orchestrator.edit(paramId(req), body.instruction));
+    }),
+  );
+
+  router.post(
+    '/:id/fixError',
+    handle((req, res) => {
+      const body = bodyObject(req);
+      if (typeof body.message !== 'string') throw new ApiError(400, 'message must be a string');
+      if (body.file !== undefined && typeof body.file !== 'string') {
+        throw new ApiError(400, 'file must be a string when provided');
+      }
+      if (body.line !== undefined && typeof body.line !== 'number') {
+        throw new ApiError(400, 'line must be a number when provided');
+      }
+      const opts: { file?: unknown; line?: unknown } = {};
+      if (body.file !== undefined) opts.file = body.file;
+      if (body.line !== undefined) opts.line = body.line;
+      res.json(orchestrator.fixError(paramId(req), body.message, opts));
+    }),
+  );
+
+  router.post(
+    '/:id/pause',
+    handle((req, res) => {
+      res.json(orchestrator.pause(paramId(req)));
+    }),
+  );
+
+  router.post(
+    '/:id/resume',
+    handle((req, res) => {
+      res.json(orchestrator.resume(paramId(req)));
+    }),
+  );
+
   router.get('/:id/events', (req, res) => {
     const id = paramId(req);
     if (orchestrator.get(id) === undefined) {
@@ -170,12 +212,18 @@ async function buildDefaultRouter(app: Application): Promise<Router> {
     throw new Error('agentRouter needs app.locals.sseHub (an SseHub); see server/src/index.ts');
   }
   const dataRoot = dataRootFor(app);
+  const checkpoints = app.locals.checkpointService as
+    | import('../agent/checkpoints.js').CheckpointService
+    | undefined;
   const orchestrator = await Orchestrator.open({
     sitesRoot: path.join(dataRoot, 'sites'),
     dataDir: dataRoot,
     hub,
     getProvider: () => defaultProvider(dataRoot),
+    ...(checkpoints !== undefined ? { checkpoints } : {}),
   });
+  // Published for the lazily-mounted checkpoint/share routers (index.ts).
+  app.locals.orchestrator = orchestrator;
   return createAgentRouter({ orchestrator, hub });
 }
 
@@ -188,6 +236,118 @@ export const agentRouter = Router().use((req: Request, res: Response, next: Next
     initialized.set(req.app, pending);
     // A failed init (e.g. unreadable config) must not poison later requests.
     pending.catch(() => initialized.delete(req.app));
+  }
+  pending.then((router) => router(req, res, next)).catch(next);
+});
+
+/* ------------------------------------------------------------------ */
+/* POST /api/enhance-prompt: one cheap provider round that rewrites a */
+/* rough draft into a complete website brief. The mock provider has   */
+/* no free-text mode, so mock config uses the deterministic canned    */
+/* enhancer below. Mounted at /api/enhance-prompt by index.ts.        */
+/* ------------------------------------------------------------------ */
+
+export const ENHANCE_DRAFT_MAX_CHARS = 8000;
+
+const ENHANCE_SYSTEM_PROMPT = [
+  'You rewrite rough website ideas into clear, complete briefs for an AI website builder.',
+  'Return only the rewritten brief as plain prose: one or two short paragraphs covering the',
+  "site's purpose, its audience, the key sections it needs, and the look and feel.",
+  'Do not ask questions, add explanations, use markdown, or wrap the result in quotes.',
+].join(' ');
+
+export function enhanceMessages(draft: string): ChatMessage[] {
+  return [
+    { role: 'system', content: ENHANCE_SYSTEM_PROMPT },
+    { role: 'user', content: draft.trim() },
+  ];
+}
+
+/**
+ * Canned enhancer for the mock provider: deterministic, derived from the
+ * draft, and structured like a real enhanced brief. Mock mode is explicitly
+ * a demo mode, so a fixed recipe here matches the rest of the pipeline.
+ */
+export function mockEnhance(draft: string): string {
+  const core = draft.trim().replace(/\s+/g, ' ').replace(/[.!?]+$/, '');
+  const lead = core.charAt(0).toUpperCase() + core.slice(1);
+  return [
+    `${lead}. The site exists to make that idea obvious within the first screen: a sticky glass navigation, an animated hero with one clear call to action, three to six sections that build the case, real social proof, and a footer with contact details.`,
+    'Look and feel: dark premium surfaces with gradient accents, fluid typography, generous whitespace, and scroll-reveal motion throughout - all of it settling instantly when the visitor prefers reduced motion.',
+  ].join('\n\n');
+}
+
+function cleanEnhanced(raw: string): string {
+  let text = raw.trim();
+  // Some models wrap the whole reply in quotes despite the instruction.
+  if (text.length > 1 && text.startsWith('"') && text.endsWith('"')) {
+    text = text.slice(1, -1).trim();
+  }
+  return text;
+}
+
+export interface EnhanceRouterDeps {
+  /** Provider kind from the persisted config; 'mock' skips the provider round. */
+  getKind: () => string | Promise<string>;
+  /** Lazily resolve the configured provider (only called for non-mock kinds). */
+  getProvider: () => Promise<Provider>;
+}
+
+export function createEnhanceRouter(deps: EnhanceRouterDeps): Router {
+  const router = Router();
+
+  router.post(
+    '/',
+    handle(async (req, res) => {
+      const body = bodyObject(req);
+      if (typeof body.draft !== 'string' || body.draft.trim() === '') {
+        throw new ApiError(400, 'draft must be a non-empty string');
+      }
+      if (body.draft.length > ENHANCE_DRAFT_MAX_CHARS) {
+        throw new ApiError(400, `draft is too long (max ${ENHANCE_DRAFT_MAX_CHARS} characters)`);
+      }
+      if ((await deps.getKind()) === 'mock') {
+        res.json({ enhanced: mockEnhance(body.draft) });
+        return;
+      }
+      let enhanced: string;
+      try {
+        const provider = await deps.getProvider();
+        enhanced = cleanEnhanced(
+          await provider.complete(enhanceMessages(body.draft), { temperature: 0.4, maxTokens: 600 }),
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new ApiError(502, `enhancement failed: ${message}`);
+      }
+      if (enhanced === '') {
+        throw new ApiError(502, 'enhancement failed: the provider returned an empty response');
+      }
+      res.json({ enhanced });
+    }),
+  );
+
+  return router;
+}
+
+const enhanceInitialized = new WeakMap<Application, Promise<Router>>();
+
+function buildEnhanceRouter(app: Application): Promise<Router> {
+  const dataRoot = dataRootFor(app);
+  return Promise.resolve(
+    createEnhanceRouter({
+      getKind: async () => (await readConfig(dataRoot)).provider,
+      getProvider: () => defaultProvider(dataRoot),
+    }),
+  );
+}
+
+export const enhanceRouter = Router().use((req: Request, res: Response, next: NextFunction) => {
+  let pending = enhanceInitialized.get(req.app);
+  if (pending === undefined) {
+    pending = buildEnhanceRouter(req.app);
+    enhanceInitialized.set(req.app, pending);
+    pending.catch(() => enhanceInitialized.delete(req.app));
   }
   pending.then((router) => router(req, res, next)).catch(next);
 });

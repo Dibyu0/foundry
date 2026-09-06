@@ -3,6 +3,8 @@ import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import { listSiteFiles, readSiteFile, writeSiteFile } from '../sites.js';
 import type { SseEvent } from '../sse.js';
+import { scanSiteEnv, type EnvReport } from './envNotes.js';
+import type { CheckpointService } from './checkpoints.js';
 import type { ChatMessage, Provider } from './provider.js';
 import { createRuntime } from './runtime.js';
 import {
@@ -15,6 +17,7 @@ import {
   applyPlanEdits,
   normalizePlan,
   planFiles,
+  sanitizeSitePath,
   toClientPlan,
   type BuildPlan,
   type ReviewIssue,
@@ -23,24 +26,38 @@ import {
   builderPrompt,
   copyPrompt,
   designPrompt,
+  fixErrorPrompt,
   plannerPrompt,
   reviewerPrompt,
+  targetedEditPrompt,
+  type FixErrorInput,
   type RoleContext,
   type RoleId,
+  type SiteFileContent,
 } from './roles.js';
 
-export type BuildPhase = 'INTAKE' | 'PLANNED' | 'BUILDING' | 'REVIEW' | 'DONE' | 'ERROR' | 'CANCELLED';
+export type BuildPhase = 'INTAKE' | 'PLANNED' | 'BUILDING' | 'REVIEW' | 'DONE' | 'EDITING' | 'ERROR' | 'CANCELLED';
 
 const TERMINAL_PHASES: ReadonlySet<BuildPhase> = new Set(['DONE', 'ERROR', 'CANCELLED']);
+/** Phases in which a drive is (or will be) doing agent work — the only pausable states. */
+const PAUSABLE_PHASES: ReadonlySet<BuildPhase> = new Set(['BUILDING', 'REVIEW', 'EDITING']);
 
 export const MAX_BRIEF_CHARS = 4000;
 export const MAX_ANSWER_CHARS = 2000;
+export const MAX_INSTRUCTION_CHARS = 4000;
+export const MAX_ERROR_MESSAGE_CHARS = 4000;
 const MAX_QUESTION_ROUNDS = 2;
 const MAX_PENDING_QUESTIONS = 4;
 const MAX_NUDGES = 3;
 const MAX_LIST = 50;
 const DEFAULT_MAX_CONCURRENT = 10;
 const PROSE_CAP = 2000;
+/** An edit round seeds the builder with at most this many current files. */
+const MAX_EDIT_FILES = 8;
+/** Plans larger than this split the remaining builder work into two parallel rounds. */
+const FAN_OUT_PLAN_FILES = 6;
+const MAX_FAN_OUT_ROUNDS = 2;
+const MAX_ERROR_LINE = 1_000_000;
 
 const TOOL_NUDGE =
   'You did not emit a tool call. Reply with exactly one tool call per line, e.g. {"tool":"<name>","args":{...}} — no markdown fences.';
@@ -77,6 +94,7 @@ export interface BuildState {
   createdAt: number;
   updatedAt: number;
   queued: boolean;
+  paused: boolean;
   messages: BuildMessage[];
   files: FileEntry[];
   pendingQuestion?: Question;
@@ -84,6 +102,8 @@ export interface BuildState {
   issues?: ReviewIssue[];
   siteUrl?: string;
   error?: string;
+  /** Environment references + secret-exposure warnings, scanned at DONE. */
+  envNotes?: EnvReport;
 }
 
 export class ApiError extends Error {
@@ -104,6 +124,14 @@ class Parked extends Error {
   }
 }
 
+/** Thrown at an agent-round boundary when pause() has parked the drive. */
+class Paused extends Error {
+  constructor() {
+    super('paused');
+    this.name = 'Paused';
+  }
+}
+
 /** Thrown when the build is cancelled (or the server shuts down) mid-drive. */
 class BuildStopped extends Error {
   constructor() {
@@ -111,6 +139,11 @@ class BuildStopped extends Error {
     this.name = 'AbortError';
   }
 }
+
+/** The follow-up work an EDITING drive performs; persisted so paused edits survive restarts. */
+export type PendingWork =
+  | { kind: 'edit'; instruction: string }
+  | { kind: 'fix'; message: string; file?: string; line?: number };
 
 interface BuildRecord {
   id: string;
@@ -127,7 +160,10 @@ interface BuildRecord {
   issues: ReviewIssue[] | undefined;
   siteUrl: string | undefined;
   error: string | undefined;
+  envNotes: EnvReport | undefined;
   questionRounds: number;
+  paused: boolean;
+  pendingWork: PendingWork | undefined;
   // runtime-only (never persisted)
   abort: AbortController | undefined;
   running: boolean;
@@ -153,7 +189,10 @@ interface Snapshot {
   issues?: ReviewIssue[];
   siteUrl?: string;
   error?: string;
+  envNotes?: EnvReport;
   questionRounds: number;
+  paused?: boolean;
+  pendingWork?: PendingWork;
 }
 
 export interface SseHubLike {
@@ -169,6 +208,8 @@ export interface OrchestratorDeps {
   hub: SseHubLike;
   /** Resolved once per drive so PUT /api/config takes effect without a restart. */
   getProvider: () => Provider | Promise<Provider>;
+  /** Optional checkpoint store: snapshots on initial DONE and after edits. */
+  checkpoints?: CheckpointService;
   maxConcurrent?: number;
   previewBase?: string;
   now?: () => number;
@@ -197,7 +238,7 @@ const ROLE_TOOLS: Record<RoleId, ReadonlySet<string>> = {
   reviewer: new Set(['readFile', 'listFiles', 'reviewNotes', 'finish']),
 };
 
-const PHASES: ReadonlySet<string> = new Set(['INTAKE', 'PLANNED', 'BUILDING', 'REVIEW', 'DONE', 'ERROR', 'CANCELLED']);
+const PHASES: ReadonlySet<string> = new Set(['INTAKE', 'PLANNED', 'BUILDING', 'REVIEW', 'DONE', 'EDITING', 'ERROR', 'CANCELLED']);
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -205,6 +246,149 @@ function errMsg(e: unknown): string {
 
 function isAbortLike(e: unknown): boolean {
   return e instanceof Error && e.name === 'AbortError';
+}
+
+/* ------------------------------------------------------------ */
+/* pure helpers (exported for focused tests)                     */
+/* ------------------------------------------------------------ */
+
+function truncateNote(s: string, max = 120): string {
+  return s.length > max ? `${s.slice(0, max - 3)}...` : s;
+}
+
+/**
+ * Builder fan-out partition: plans with more than FAN_OUT_PLAN_FILES files
+ * split the remaining work into two parallel rounds over contiguous
+ * plan-ordered halves (capped at MAX_FAN_OUT_ROUNDS), so each round's file
+ * events preserve plan order within the group.
+ */
+export function partitionRemaining(plan: BuildPlan, remaining: string[]): string[][] {
+  if (planFiles(plan).length <= FAN_OUT_PLAN_FILES || remaining.length < 2) return [remaining];
+  const mid = Math.ceil(remaining.length / MAX_FAN_OUT_ROUNDS);
+  return [remaining.slice(0, mid), remaining.slice(mid)];
+}
+
+/**
+ * Word hints that point an edit instruction at a file family even when no
+ * file is named outright ("make the headline bigger" -> html + css).
+ */
+const EDIT_EXT_HINTS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ['css', ['style', 'styles', 'styling', 'css', 'color', 'colors', 'colour', 'colours', 'font', 'fonts', 'layout', 'design', 'theme', 'spacing', 'animation', 'animations', 'motion', 'gradient', 'hover', 'responsive', 'mobile', 'bigger', 'smaller']],
+  ['js', ['script', 'scripts', 'js', 'javascript', 'behavior', 'behaviour', 'interaction', 'interactive', 'counter', 'counters', 'reveal', 'marquee', 'menu', 'toggle', 'carousel', 'slider', 'glow', 'scroll', 'click', 'error', 'broken', 'bug']],
+  ['html', ['html', 'markup', 'page', 'copy', 'text', 'headline', 'hero', 'section', 'sections', 'content', 'pricing', 'price', 'faq', 'faqs', 'testimonial', 'testimonials', 'footer', 'header', 'nav', 'form', 'title', 'heading', 'button', 'link', 'image', 'images']],
+  ['md', ['readme', 'docs', 'documentation', 'md']],
+  ['json', ['json', 'data']],
+  ['svg', ['icon', 'icons', 'svg', 'logo']],
+];
+
+function editScore(path: string, tokens: readonly string[]): number {
+  const lower = path.toLowerCase();
+  const segments = lower.split('/');
+  const filename = segments[segments.length - 1] ?? lower;
+  const dot = filename.lastIndexOf('.');
+  const stem = dot > 0 ? filename.slice(0, dot) : filename;
+  const ext = dot > 0 ? filename.slice(dot + 1) : '';
+  let score = 0;
+  for (const t of tokens) {
+    if (t === lower) score += 6; // full path mentioned: "assets/site.css"
+    else if (t === filename) score += 5; // file mentioned: "styles.css"
+    else if (t === stem) score += 4; // stem mentioned: "styles"
+    else if (segments.includes(t)) score += 3; // directory/segment match
+    else if (t.length >= 4 && lower.includes(t)) score += 1; // loose substring
+  }
+  for (const [hintExt, words] of EDIT_EXT_HINTS) {
+    if (hintExt !== ext) continue;
+    // Multiple matched hint words rank higher: "hero headline" is markup,
+    // not just "something in an html file".
+    const hits = words.filter((w) => tokens.includes(w)).length;
+    if (hits > 0) score += Math.min(1 + hits, 4);
+    break;
+  }
+  return score;
+}
+
+/**
+ * Picks the <= max files an edit instruction most likely refers to, using
+ * name/path heuristics. Input order is the tie-break (callers pass plan
+ * order), so equal scores keep plan order. When nothing matches lexically,
+ * the core trio is seeded as the sensible default context; the builder can
+ * always readFile anything the seed misses.
+ */
+export function selectEditFiles(paths: readonly string[], instruction: string, max: number = MAX_EDIT_FILES): string[] {
+  const tokens = [
+    ...new Set((instruction.toLowerCase().match(/[a-z0-9]+(?:\.[a-z0-9]+)*/g) ?? []).filter((t) => t.length >= 2)),
+  ];
+  const scored = paths.map((p) => ({ path: p, score: editScore(p, tokens) }));
+  if (scored.every((s) => s.score === 0)) {
+    for (const core of ['index.html', 'styles.css', 'app.js']) {
+      const hit = scored.find((s) => s.path === core);
+      if (hit !== undefined) hit.score = 1;
+    }
+  }
+  scored.sort((a, b) => b.score - a.score); // stable: ties keep input order
+  return scored
+    .filter((s) => s.score > 0)
+    .slice(0, Math.max(1, max))
+    .map((s) => s.path);
+}
+
+const ERROR_PATH_RE = /([A-Za-z0-9_][A-Za-z0-9_\-./]*\.(?:html|css|js|svg|json|txt|md))(?:\s*:\s*(\d{1,7}))?/g;
+
+/** Shape-checks a persisted work item; anything unrecognized is dropped, never trusted. */
+function revivePendingWork(raw: unknown): PendingWork | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  if (o.kind === 'edit' && typeof o.instruction === 'string' && o.instruction !== '') {
+    return { kind: 'edit', instruction: o.instruction };
+  }
+  if (o.kind === 'fix' && typeof o.message === 'string' && o.message !== '') {
+    const work: PendingWork = { kind: 'fix', message: o.message };
+    if (typeof o.file === 'string' && o.file !== '') work.file = o.file;
+    if (typeof o.line === 'number' && Number.isInteger(o.line) && o.line >= 1) work.line = o.line;
+    return work;
+  }
+  return undefined;
+}
+
+/**
+ * Pulls the implicated site file (and optional 1-based line) out of a console
+ * error message like "Uncaught TypeError at app.js:42". When `known` paths
+ * are given, the first match that is actually part of the site wins.
+ */
+export function parseErrorLocation(message: string, known?: readonly string[]): { file?: string; line?: number } {
+  const validLine = (raw: string | undefined): number | undefined => {
+    if (raw === undefined) return undefined;
+    const n = Number(raw);
+    return Number.isInteger(n) && n >= 1 && n <= MAX_ERROR_LINE ? n : undefined;
+  };
+  let file: string | undefined;
+  let line: number | undefined;
+  let fallback: string | undefined;
+  let fallbackLine: number | undefined;
+  for (const m of message.matchAll(ERROR_PATH_RE)) {
+    const candidate = sanitizeSitePath(m[1]);
+    if (candidate === null) continue;
+    if (known !== undefined && known.includes(candidate)) {
+      file = candidate;
+      line = validLine(m[2]);
+      break;
+    }
+    if (fallback === undefined) {
+      fallback = candidate;
+      fallbackLine = validLine(m[2]);
+    }
+  }
+  if (file === undefined && known === undefined && fallback !== undefined) {
+    file = fallback;
+    line = fallbackLine;
+  }
+  if (line === undefined) {
+    line = validLine(/line\s+(\d{1,7})/i.exec(message)?.[1]);
+  }
+  const out: { file?: string; line?: number } = {};
+  if (file !== undefined) out.file = file;
+  if (line !== undefined) out.line = line;
+  return out;
 }
 
 /**
@@ -254,7 +438,28 @@ export class Orchestrator {
         console.error(`[foundry] ignoring malformed build snapshot ${name}`);
         continue;
       }
-      if (b.phase === 'BUILDING' || b.phase === 'REVIEW' || (b.phase === 'INTAKE' && b.pendingQuestion === undefined)) {
+      const midFlight =
+        b.phase === 'BUILDING' || b.phase === 'REVIEW' || b.phase === 'EDITING'
+        || (b.phase === 'INTAKE' && b.pendingQuestion === undefined);
+      if (midFlight && b.paused && b.phase !== 'INTAKE') {
+        // A paused drive holds no in-flight work, so it survives a restart
+        // resumable (EDITING resumes from the persisted pendingWork).
+        b.messages.push({
+          role: 'system',
+          text: 'The server restarted; the build is still paused — resume it to continue.',
+          ts: o.now(),
+        });
+      } else if (b.phase === 'EDITING') {
+        // The pre-edit site is still intact and live; an interrupted edit may
+        // be partially applied, so say so instead of claiming either outcome.
+        b.phase = 'DONE';
+        b.pendingWork = undefined;
+        b.messages.push({
+          role: 'system',
+          text: 'The edit was interrupted by a server restart; some edited files may be only partially applied.',
+          ts: o.now(),
+        });
+      } else if (midFlight) {
         b.phase = 'ERROR';
         b.error = 'interrupted by server restart';
         b.pendingQuestion = undefined;
@@ -290,7 +495,10 @@ export class Orchestrator {
       issues: undefined,
       siteUrl: undefined,
       error: undefined,
+      envNotes: undefined,
       questionRounds: 0,
+      paused: false,
+      pendingWork: undefined,
       abort: undefined,
       running: false,
       queued: false,
@@ -371,6 +579,8 @@ export class Orchestrator {
     const qi = this.queue.indexOf(id);
     if (qi !== -1) this.queue.splice(qi, 1);
     b.queued = false;
+    b.paused = false;
+    b.pendingWork = undefined;
     b.pendingQuestion = undefined;
     b.questionQueue = [];
     b.phase = 'CANCELLED';
@@ -379,6 +589,117 @@ export class Orchestrator {
     this.persist(b);
     if (b.abort !== undefined) b.abort.abort();
     this.deps.hub.drop?.(id);
+    return this.toState(b);
+  }
+
+  /**
+   * Follow-up edit on a DONE build: reopens it as EDITING and queues one
+   * targeted builder round. The instruction is validated here; the round
+   * itself runs in drive() -> runEditing().
+   */
+  edit(id: string, instructionInput: string): BuildState {
+    const b = this.mustGet(id);
+    const instruction = typeof instructionInput === 'string' ? instructionInput.trim() : '';
+    if (instruction === '') throw new ApiError(400, 'instruction must be a non-empty string');
+    if (instruction.length > MAX_INSTRUCTION_CHARS) {
+      throw new ApiError(400, `instruction must be at most ${MAX_INSTRUCTION_CHARS} characters`);
+    }
+    if (b.phase !== 'DONE') {
+      throw new ApiError(409, `only a DONE build accepts edits (phase ${b.phase})`);
+    }
+    b.pendingWork = { kind: 'edit', instruction };
+    this.pushMessage(b, { role: 'user', text: instruction });
+    this.setPhase(b, 'EDITING');
+    this.persist(b);
+    this.activate(id);
+    return this.toState(b);
+  }
+
+  /**
+   * "Fix this error" on a DONE build: one builder round fed with the console
+   * error text plus the implicated file's content, then back to DONE.
+   */
+  fixError(id: string, messageInput: string, opts: { file?: unknown; line?: unknown } = {}): BuildState {
+    const b = this.mustGet(id);
+    const message = typeof messageInput === 'string' ? messageInput.trim() : '';
+    if (message === '') throw new ApiError(400, 'message must be a non-empty string');
+    if (message.length > MAX_ERROR_MESSAGE_CHARS) {
+      throw new ApiError(400, `message must be at most ${MAX_ERROR_MESSAGE_CHARS} characters`);
+    }
+    if (b.phase !== 'DONE') {
+      throw new ApiError(409, `only a DONE build accepts error fixes (phase ${b.phase})`);
+    }
+    let file: string | undefined;
+    if (opts.file !== undefined) {
+      const sanitized = sanitizeSitePath(opts.file);
+      if (sanitized === null) throw new ApiError(400, 'file must be a valid relative site path');
+      if (!b.files.some((f) => f.path === sanitized)) {
+        throw new ApiError(400, `file is not part of this site: ${sanitized}`);
+      }
+      file = sanitized;
+    }
+    let line: number | undefined;
+    if (opts.line !== undefined) {
+      if (typeof opts.line !== 'number' || !Number.isInteger(opts.line) || opts.line < 1 || opts.line > MAX_ERROR_LINE) {
+        throw new ApiError(400, `line must be an integer between 1 and ${MAX_ERROR_LINE}`);
+      }
+      line = opts.line;
+    }
+    const work: PendingWork = { kind: 'fix', message };
+    if (file !== undefined) work.file = file;
+    if (line !== undefined) work.line = line;
+    b.pendingWork = work;
+    this.pushMessage(b, {
+      role: 'user',
+      text: `Fix this error${file !== undefined ? ` in ${file}${line !== undefined ? `:${line}` : ''}` : ''}: ${message}`,
+    });
+    this.setPhase(b, 'EDITING');
+    this.persist(b);
+    this.activate(id);
+    return this.toState(b);
+  }
+
+  /**
+   * Parks the state machine at the next agent-round boundary (never mid
+   * tool-call). When a round is in flight the pause is honest about being
+   * pending: the event carries pending: true and the drive parks when the
+   * current reply completes. Paused state is persisted, so a paused build
+   * stays resumable across restarts.
+   */
+  pause(id: string): BuildState {
+    const b = this.mustGet(id);
+    if (!PAUSABLE_PHASES.has(b.phase)) {
+      throw new ApiError(409, `build is not doing agent work (phase ${b.phase})`);
+    }
+    if (b.paused) return this.toState(b);
+    b.paused = true;
+    // A queued build yields its slot; resume() re-queues through activate().
+    const qi = this.queue.indexOf(id);
+    if (qi !== -1) this.queue.splice(qi, 1);
+    b.queued = false;
+    const pending = b.running;
+    this.emit(b, { type: 'pause', paused: true, pending });
+    this.pushMessage(b, {
+      role: 'system',
+      text: pending
+        ? 'Pause requested — the current agent round will finish first.'
+        : 'Build paused.',
+    });
+    this.persist(b);
+    return this.toState(b);
+  }
+
+  resume(id: string): BuildState {
+    const b = this.mustGet(id);
+    if (TERMINAL_PHASES.has(b.phase)) {
+      throw new ApiError(409, `build cannot be resumed (phase ${b.phase})`);
+    }
+    if (!b.paused) throw new ApiError(409, `build is not paused (phase ${b.phase})`);
+    b.paused = false;
+    this.emit(b, { type: 'pause', paused: false, pending: false });
+    this.pushMessage(b, { role: 'system', text: 'Build resumed.' });
+    this.persist(b);
+    this.activate(id);
     return this.toState(b);
   }
 
@@ -411,6 +732,7 @@ export class Orchestrator {
   private activate(id: string): void {
     const b = this.builds.get(id);
     if (b === undefined || b.running || TERMINAL_PHASES.has(b.phase)) return;
+    if (b.paused) return;
     if (b.phase === 'INTAKE' && b.pendingQuestion !== undefined) return;
     if (b.phase === 'PLANNED') return;
     if (this.activeCount >= this.maxConcurrent) {
@@ -445,6 +767,11 @@ export class Orchestrator {
       if (id === undefined) break;
       const b = this.builds.get(id);
       if (b === undefined || b.running || TERMINAL_PHASES.has(b.phase)) continue;
+      if (b.paused) {
+        // Normally pause() already dequeued it; never start a paused build.
+        b.queued = false;
+        continue;
+      }
       if (b.phase === 'INTAKE' && b.pendingQuestion !== undefined) continue;
       if (b.phase === 'PLANNED') continue;
       b.queued = false;
@@ -459,10 +786,16 @@ export class Orchestrator {
       const provider = await this.deps.getProvider();
       this.throwIfStopped(b);
       if (b.phase === 'INTAKE') await this.runIntake(b, provider);
-      if (b.phase === 'BUILDING') await this.runBuilding(b, provider);
+      // REVIEW re-enters runBuilding: a build parked during review resumes
+      // here, and runBuilding skips the stages already on disk.
+      if (b.phase === 'BUILDING' || b.phase === 'REVIEW') await this.runBuilding(b, provider);
+      if (b.phase === 'EDITING') await this.runEditing(b, provider);
     } catch (err) {
       if (err instanceof Parked) {
         // Parked for user input; state was persisted at the park point.
+      } else if (err instanceof Paused) {
+        // Parked at an agent-round boundary; resume() re-activates the drive.
+        this.persist(b);
       } else if (b.phase === 'CANCELLED' || isAbortLike(err)) {
         // Cancelled (or shut down) mid-drive; cancel() already reported it.
       } else {
@@ -493,65 +826,135 @@ export class Orchestrator {
     const plan = b.plan;
     if (plan === undefined) throw new Error('cannot build without an approved plan');
 
-    b.currentRole = 'design';
-    this.activity(b, 'design', 'active', 'writing styles.css');
-    await this.agentLoop(b, 'design', {
-      prompt: designPrompt(this.roleContext(b)),
-      kickoff: 'Write the complete styles.css now, then finish.',
-      provider,
-      maxTurns: 6,
-      requiredFiles: ['styles.css'],
-    });
-    this.activity(b, 'design', 'done');
-    b.currentRole = undefined;
+    // Resume-safe: a build re-driven after parking between rounds skips the
+    // stages whose output is already on disk and continues where it stopped.
+    const onDisk = new Set((await listSiteFiles(this.deps.sitesRoot, b.id)).map((e) => e.path));
+
+    if (!onDisk.has('styles.css')) {
+      b.currentRole = 'design';
+      this.activity(b, 'design', 'active', 'writing styles.css');
+      try {
+        await this.agentLoop(b, 'design', {
+          prompt: designPrompt(this.roleContext(b)),
+          kickoff: 'Write the complete styles.css now, then finish.',
+          provider,
+          maxTurns: 6,
+          requiredFiles: ['styles.css'],
+        });
+        this.activity(b, 'design', 'done');
+      } finally {
+        b.currentRole = undefined;
+      }
+    }
 
     this.throwIfStopped(b);
-    b.currentRole = 'copy';
-    this.activity(b, 'copy', 'active', 'writing index.html');
-    this.activity(b, 'builder', 'active', 'writing app.js');
-    const [copyResult, builderResult] = await Promise.allSettled([
-      this.agentLoop(b, 'copy', {
-        prompt: copyPrompt(this.roleContext(b)),
-        kickoff: 'Write the complete index.html now, then finish.',
-        provider,
-        maxTurns: 8,
-        requiredFiles: ['index.html'],
-      }),
-      (async () => {
-        b.currentRole = 'builder';
-        await this.agentLoop(b, 'builder', {
-          prompt: builderPrompt(this.roleContext(b)),
-          kickoff: 'Write the complete app.js now, then finish.',
-          provider,
-          maxTurns: 10,
-          requiredFiles: ['app.js'],
-        });
-      })(),
-    ]);
+    this.throwIfPaused(b);
+    const pair: Array<{ role: 'copy' | 'builder'; run: Promise<void> }> = [];
+    if (!onDisk.has('index.html')) {
+      this.activity(b, 'copy', 'active', 'writing index.html');
+      pair.push({
+        role: 'copy',
+        run: (async () => {
+          b.currentRole = 'copy';
+          try {
+            await this.agentLoop(b, 'copy', {
+              prompt: copyPrompt(this.roleContext(b)),
+              kickoff: 'Write the complete index.html now, then finish.',
+              provider,
+              maxTurns: 8,
+              requiredFiles: ['index.html'],
+            });
+          } finally {
+            b.currentRole = undefined;
+          }
+        })(),
+      });
+    }
+    if (!onDisk.has('app.js')) {
+      this.activity(b, 'builder', 'active', 'writing app.js');
+      pair.push({
+        role: 'builder',
+        run: (async () => {
+          b.currentRole = 'builder';
+          try {
+            await this.agentLoop(b, 'builder', {
+              prompt: builderPrompt(this.roleContext(b)),
+              kickoff: 'Write the complete app.js now, then finish.',
+              provider,
+              maxTurns: 10,
+              requiredFiles: ['app.js'],
+            });
+          } finally {
+            b.currentRole = undefined;
+          }
+        })(),
+      });
+    }
+    const pairResults = await Promise.allSettled(pair.map((p) => p.run));
     this.throwIfStopped(b);
-    for (const [role, result] of [['copy', copyResult], ['builder', builderResult]] as const) {
-      if (result.status === 'fulfilled') this.activity(b, role, 'done');
+    this.throwIfPaused(b);
+    for (const [i, result] of pairResults.entries()) {
+      const p = pair[i];
+      if (p === undefined) continue;
+      if (result.status === 'fulfilled') this.activity(b, p.role, 'done');
       else {
-        this.activity(b, role, 'error', errMsg(result.reason));
+        this.activity(b, p.role, 'error', errMsg(result.reason));
         throw result.reason;
       }
     }
-    b.currentRole = undefined;
-
     const written = new Set((await listSiteFiles(this.deps.sitesRoot, b.id)).map((e) => e.path));
     const remaining = planFiles(plan).filter((f) => !written.has(f));
     if (remaining.length > 0) {
       this.throwIfStopped(b);
+      this.throwIfPaused(b);
       b.currentRole = 'builder';
-      this.activity(b, 'builder', 'active', `writing remaining files: ${remaining.join(', ')}`);
-      await this.agentLoop(b, 'builder', {
-        prompt: builderPrompt({ ...this.roleContext(b), remainingFiles: remaining }),
-        kickoff: `Write the remaining planned files now: ${remaining.join(', ')}`,
-        provider,
-        maxTurns: 6,
-        bestEffort: true,
-        targetFiles: new Set(remaining),
-      });
+      // Fan-out: big plans split the remaining work into two parallel builder
+      // rounds over contiguous plan-ordered groups, so each round's file
+      // events keep plan order within the group (syncFiles sorts per sync).
+      const groups = partitionRemaining(plan, remaining);
+      try {
+        if (groups.length === 1) {
+          const group = groups[0] ?? remaining;
+          this.activity(b, 'builder', 'active', `writing remaining files: ${group.join(', ')}`);
+          await this.agentLoop(b, 'builder', {
+            prompt: builderPrompt({ ...this.roleContext(b), remainingFiles: group }),
+            kickoff: `Write the remaining planned files now: ${group.join(', ')}`,
+            provider,
+            maxTurns: 6,
+            bestEffort: true,
+            targetFiles: new Set(group),
+          });
+          this.activity(b, 'builder', 'done');
+        } else {
+          for (const group of groups) {
+            this.activity(b, 'builder', 'active', `writing remaining files: ${group.join(', ')}`);
+          }
+          const results = await Promise.allSettled(
+            groups.map((group) =>
+              this.agentLoop(b, 'builder', {
+                prompt: builderPrompt({ ...this.roleContext(b), remainingFiles: group }),
+                kickoff: `Write the remaining planned files now: ${group.join(', ')}`,
+                provider,
+                maxTurns: 6,
+                bestEffort: true,
+                targetFiles: new Set(group),
+              }),
+            ),
+          );
+          this.throwIfStopped(b);
+          this.throwIfPaused(b);
+          for (const result of results) {
+            if (result.status === 'fulfilled') this.activity(b, 'builder', 'done');
+            else {
+              if (result.reason instanceof Paused || result.reason instanceof BuildStopped) throw result.reason;
+              this.activity(b, 'builder', 'error', errMsg(result.reason));
+              throw result.reason;
+            }
+          }
+        }
+      } finally {
+        b.currentRole = undefined;
+      }
       const skipped = remaining.filter((f) => !b.files.some((x) => x.path === f));
       if (skipped.length > 0) {
         this.pushMessage(b, {
@@ -559,8 +962,6 @@ export class Orchestrator {
           text: `The builder did not produce: ${skipped.join(', ')} — continuing without them.`,
         });
       }
-      this.activity(b, 'builder', 'done');
-      b.currentRole = undefined;
     }
 
     this.setPhase(b, 'REVIEW');
@@ -579,6 +980,7 @@ export class Orchestrator {
     const issues = b.issues ?? [];
     if (issues.length > 0) {
       this.throwIfStopped(b);
+      this.throwIfPaused(b);
       b.currentRole = 'builder';
       this.activity(b, 'builder', 'active', `fixing ${issues.length} review issue(s)`);
       await this.agentLoop(b, 'builder', {
@@ -595,10 +997,216 @@ export class Orchestrator {
 
     b.siteUrl = `${this.previewBase}/${encodeURIComponent(b.id)}/`;
     this.pushMessage(b, { role: 'system', text: 'Build complete — the preview is live.' });
+    await this.scanEnvNotes(b);
+    await this.snapshotCheckpoint(b, 'initial build');
     this.setPhase(b, 'DONE');
     this.emit(b, { type: 'done', siteUrl: b.siteUrl });
     this.persist(b);
     this.deps.hub.drop?.(b.id);
+  }
+
+  /** Env-reference scan at DONE: never fails a build, only reports. */
+  private async scanEnvNotes(b: BuildRecord): Promise<void> {
+    try {
+      b.envNotes = await scanSiteEnv(this.deps.sitesRoot, b.id);
+      this.emit(b, { type: 'env', report: b.envNotes });
+    } catch (err) {
+      console.error(`env scan failed for build ${b.id}:`, err);
+    }
+  }
+
+  /** Checkpoint snapshot (initial build / edit / fix): best-effort. */
+  private async snapshotCheckpoint(b: BuildRecord, label: string): Promise<void> {
+    if (this.deps.checkpoints === undefined) return;
+    try {
+      await this.deps.checkpoints.snapshot(b.id, label.slice(0, 200));
+    } catch (err) {
+      console.error(`checkpoint snapshot failed for build ${b.id}:`, err);
+    }
+  }
+
+  /* ------------------------------------------------------------ */
+  /* follow-up edits and error fixes (EDITING)                     */
+  /* ------------------------------------------------------------ */
+
+  private async runEditing(b: BuildRecord, provider: Provider): Promise<void> {
+    const work = b.pendingWork;
+    if (work === undefined) {
+      // Only reachable if the work item was lost; never pretend an edit ran.
+      this.pushMessage(b, {
+        role: 'system',
+        text: 'The edit request was lost before it could run — no changes were made.',
+      });
+      this.setPhase(b, 'DONE');
+      this.emit(b, { type: 'done', siteUrl: this.siteUrlFor(b) });
+      this.persist(b);
+      return;
+    }
+    try {
+      if (work.kind === 'fix') await this.runFixRound(b, provider, work);
+      else await this.runEditRound(b, provider, work.instruction);
+      b.pendingWork = undefined;
+    } catch (err) {
+      // Paused keeps the work item so resume() restarts the round; stops and
+      // cancels propagate to drive()'s own handling.
+      if (err instanceof Paused || err instanceof Parked || isAbortLike(err) || b.phase === 'CANCELLED') throw err;
+      b.pendingWork = undefined;
+      // A failed edit must not kill a working site: report it honestly and
+      // hand the build back to DONE with the previous version still live.
+      const message = errMsg(err);
+      b.currentRole = undefined;
+      this.activity(b, 'builder', 'error', message);
+      this.pushMessage(b, {
+        role: 'system',
+        text: `The edit failed: ${message} — the previous version is still live.`,
+      });
+      this.setPhase(b, 'DONE');
+      this.emit(b, { type: 'done', siteUrl: this.siteUrlFor(b) });
+    }
+    this.persist(b);
+    this.deps.hub.drop?.(b.id);
+  }
+
+  private async runEditRound(b: BuildRecord, provider: Provider, instruction: string): Promise<void> {
+    const selected = selectEditFiles(this.planOrderedFiles(b), instruction, MAX_EDIT_FILES);
+    const loaded: SiteFileContent[] = [];
+    for (const p of selected) {
+      try {
+        loaded.push({ path: p, content: (await readSiteFile(this.deps.sitesRoot, b.id, p)).toString('utf8') });
+      } catch {
+        // Vanished between listing and reading; the builder can listFiles itself.
+      }
+    }
+    const before = await this.fileSizeMap(b);
+    b.currentRole = 'builder';
+    this.activity(b, 'builder', 'active', `editing: ${truncateNote(instruction)}`);
+    try {
+      await this.agentLoop(b, 'builder', {
+        prompt: targetedEditPrompt(b.brief, instruction, loaded),
+        kickoff: `Apply this edit now: ${instruction} — rewrite only the files that change, then finish.`,
+        provider,
+        maxTurns: 8,
+        bestEffort: true,
+      });
+    } finally {
+      b.currentRole = undefined;
+    }
+    this.throwIfStopped(b);
+    this.throwIfPaused(b);
+    this.activity(b, 'builder', 'done');
+    const touched = await this.changedFilePaths(b, before);
+    if (touched.length === 0) {
+      this.pushMessage(b, { role: 'system', text: 'The edit did not change any files.' });
+    } else {
+      this.pushMessage(b, { role: 'system', text: `Edit applied — changed: ${touched.join(', ')}.` });
+    }
+    if (touched.length > 3) {
+      // A wide-reaching edit gets a fresh review pass and a fix pass on
+      // findings. The phase stays EDITING throughout so resume() dispatches
+      // correctly; the reviewer shows up through its activity events.
+      b.currentRole = 'reviewer';
+      this.activity(b, 'reviewer', 'active', 'reviewing the edit');
+      try {
+        await this.agentLoop(b, 'reviewer', {
+          prompt: reviewerPrompt(this.roleContext(b)),
+          kickoff: 'Review the edited site now: listFiles, read every file, then reviewNotes and finish.',
+          provider,
+          maxTurns: 10,
+          requireReviewNotes: true,
+        });
+      } finally {
+        b.currentRole = undefined;
+      }
+      this.activity(b, 'reviewer', 'done');
+      this.throwIfStopped(b);
+      this.throwIfPaused(b);
+      const issues = b.issues ?? [];
+      if (issues.length > 0) {
+        b.currentRole = 'builder';
+        this.activity(b, 'builder', 'active', `fixing ${issues.length} review issue(s)`);
+        try {
+          await this.agentLoop(b, 'builder', {
+            prompt: builderPrompt({ ...this.roleContext(b), issues }),
+            kickoff: 'Fix the review issues now: rewrite each affected file completely, then finish.',
+            provider,
+            maxTurns: 10,
+            bestEffort: true,
+            completeOnAnyWrite: true,
+          });
+        } finally {
+          b.currentRole = undefined;
+        }
+        this.activity(b, 'builder', 'done');
+      }
+    }
+    this.emit(b, {
+      type: 'checkpoint',
+      checkpoint: { kind: 'edit', instruction, files: touched, at: this.now() },
+    });
+    await this.snapshotCheckpoint(b, `edit: ${instruction}`);
+    if (touched.length > 0) {
+      this.pushMessage(b, { role: 'system', text: 'Edit complete — the preview is up to date.' });
+    }
+    this.setPhase(b, 'DONE');
+    this.emit(b, { type: 'done', siteUrl: this.siteUrlFor(b) });
+  }
+
+  private async runFixRound(
+    b: BuildRecord,
+    provider: Provider,
+    work: { kind: 'fix'; message: string; file?: string; line?: number },
+  ): Promise<void> {
+    const parsed = parseErrorLocation(work.message, b.files.map((f) => f.path));
+    let file = work.file ?? parsed.file;
+    if (file !== undefined && !b.files.some((f) => f.path === file)) file = undefined;
+    const line = work.line ?? parsed.line;
+    // Console errors are most often script errors; prefer app.js over nothing.
+    if (file === undefined && b.files.some((f) => f.path === 'app.js')) file = 'app.js';
+    let content: string | undefined;
+    if (file !== undefined) {
+      try {
+        content = (await readSiteFile(this.deps.sitesRoot, b.id, file)).toString('utf8');
+      } catch {
+        content = undefined; // vanished; the builder can readFile/listFiles itself
+      }
+    }
+    const where = file !== undefined ? ` in ${file}${line !== undefined ? `:${line}` : ''}` : '';
+    const before = await this.fileSizeMap(b);
+    b.currentRole = 'builder';
+    this.activity(b, 'builder', 'active', `fixing the reported error${where}`);
+    try {
+      const errorInput: FixErrorInput = { message: work.message };
+      if (file !== undefined) errorInput.file = file;
+      if (line !== undefined) errorInput.line = line;
+      const implicated: SiteFileContent[] = file !== undefined && content !== undefined ? [{ path: file, content }] : [];
+      await this.agentLoop(b, 'builder', {
+        prompt: fixErrorPrompt(b.brief, errorInput, implicated),
+        kickoff: `Fix this site error now${where}: ${work.message}`,
+        provider,
+        maxTurns: 6,
+        bestEffort: true,
+        completeOnAnyWrite: true,
+      });
+    } finally {
+      b.currentRole = undefined;
+    }
+    this.throwIfStopped(b);
+    this.throwIfPaused(b);
+    const touched = await this.changedFilePaths(b, before);
+    if (touched.length === 0) {
+      this.activity(b, 'builder', 'done', 'no file changes');
+      this.pushMessage(b, { role: 'system', text: 'The builder did not change any files for this error.' });
+    } else {
+      this.activity(b, 'builder', 'done', `fixed${where}: ${touched.join(', ')}`);
+      this.pushMessage(b, { role: 'system', text: `Fix applied — changed: ${touched.join(', ')}.` });
+    }
+    this.emit(b, {
+      type: 'checkpoint',
+      checkpoint: { kind: 'fix', message: work.message, files: touched, at: this.now() },
+    });
+    await this.snapshotCheckpoint(b, `fix: ${work.message}`);
+    this.setPhase(b, 'DONE');
+    this.emit(b, { type: 'done', siteUrl: this.siteUrlFor(b) });
   }
 
   /* ------------------------------------------------------------ */
@@ -682,6 +1290,7 @@ export class Orchestrator {
         throw new Error(`${role} did not finish its job within ${opts.maxTurns} replies`);
       }
       this.throwIfStopped(b);
+      this.throwIfPaused(b);
       const signal = b.abort?.signal;
       const result = await runtime.run(messages, {
         ...(signal !== undefined ? { signal } : {}),
@@ -853,6 +1462,42 @@ export class Orchestrator {
   /* state helpers                                                 */
   /* ------------------------------------------------------------ */
 
+  private siteUrlFor(b: BuildRecord): string {
+    return b.siteUrl ?? `${this.previewBase}/${encodeURIComponent(b.id)}/`;
+  }
+
+  private async fileSizeMap(b: BuildRecord): Promise<Map<string, number>> {
+    const entries = await listSiteFiles(this.deps.sitesRoot, b.id);
+    return new Map(entries.map((e) => [e.path, e.size]));
+  }
+
+  /** Recorded files ordered the way syncFiles emits them: plan order, then alphabetical. */
+  private planOrderedFiles(b: BuildRecord): string[] {
+    const planned = b.plan !== undefined ? planFiles(b.plan) : [];
+    const rank = (p: string): number => {
+      const i = planned.indexOf(p);
+      return i === -1 ? planned.length : i;
+    };
+    return b.files.map((f) => f.path).sort((x, y) => rank(x) - rank(y) || x.localeCompare(y));
+  }
+
+  /**
+   * Paths created or size-changed since `before`, in plan order. A same-size
+   * rewrite is invisible here, exactly as in syncFiles' event diffing.
+   */
+  private async changedFilePaths(b: BuildRecord, before: Map<string, number>): Promise<string[]> {
+    const entries = await listSiteFiles(this.deps.sitesRoot, b.id);
+    const planned = b.plan !== undefined ? planFiles(b.plan) : [];
+    const rank = (p: string): number => {
+      const i = planned.indexOf(p);
+      return i === -1 ? planned.length : i;
+    };
+    return entries
+      .filter((e) => before.get(e.path) !== e.size)
+      .map((e) => e.path)
+      .sort((x, y) => rank(x) - rank(y) || x.localeCompare(y));
+  }
+
   private mustGet(id: string): BuildRecord {
     const b = this.builds.get(id);
     if (b === undefined) throw new ApiError(404, `unknown build id: ${id}`);
@@ -861,6 +1506,11 @@ export class Orchestrator {
 
   private throwIfStopped(b: BuildRecord): void {
     if (b.abort?.signal.aborted === true || b.phase === 'CANCELLED') throw new BuildStopped();
+  }
+
+  /** Round-boundary check: parks the drive when pause() has been requested. */
+  private throwIfPaused(b: BuildRecord): void {
+    if (b.paused) throw new Paused();
   }
 
   private fail(b: BuildRecord, err: unknown): void {
@@ -914,6 +1564,7 @@ export class Orchestrator {
       createdAt: b.createdAt,
       updatedAt: b.updatedAt,
       queued: b.queued,
+      paused: b.paused,
       messages: b.messages.map((m) => ({ ...m })),
       files: b.files.map((f) => ({ ...f })),
       ...(b.pendingQuestion !== undefined ? { pendingQuestion: b.pendingQuestion } : {}),
@@ -921,6 +1572,7 @@ export class Orchestrator {
       ...(b.issues !== undefined ? { issues: b.issues.map((i) => ({ ...i })) } : {}),
       ...(b.siteUrl !== undefined ? { siteUrl: b.siteUrl } : {}),
       ...(b.error !== undefined ? { error: b.error } : {}),
+      ...(b.envNotes !== undefined ? { envNotes: b.envNotes } : {}),
     };
   }
 
@@ -946,7 +1598,10 @@ export class Orchestrator {
       ...(b.issues !== undefined ? { issues: b.issues } : {}),
       ...(b.siteUrl !== undefined ? { siteUrl: b.siteUrl } : {}),
       ...(b.error !== undefined ? { error: b.error } : {}),
+      ...(b.envNotes !== undefined ? { envNotes: b.envNotes } : {}),
       questionRounds: b.questionRounds,
+      ...(b.paused ? { paused: true } : {}),
+      ...(b.pendingWork !== undefined ? { pendingWork: b.pendingWork } : {}),
     };
     const json = JSON.stringify(snapshot);
     const file = path.join(this.buildsDir, `${b.id}.json`);
@@ -984,7 +1639,13 @@ export class Orchestrator {
       issues: Array.isArray(s.issues) ? s.issues : undefined,
       siteUrl: typeof s.siteUrl === 'string' ? s.siteUrl : undefined,
       error: typeof s.error === 'string' ? s.error : undefined,
+      envNotes:
+        s.envNotes && typeof s.envNotes === 'object' && !Array.isArray(s.envNotes)
+          ? s.envNotes
+          : undefined,
       questionRounds: typeof s.questionRounds === 'number' ? s.questionRounds : 0,
+      paused: s.paused === true,
+      pendingWork: revivePendingWork(s.pendingWork),
       abort: undefined,
       running: false,
       queued: false,

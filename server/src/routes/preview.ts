@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
+import { injectBridge } from '../previewInject.js';
 import { SiteError, resolveSitePath, siteExists } from '../sites.js';
 
 const PREVIEW_CSP = "default-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:";
@@ -43,13 +44,19 @@ async function serveFile(sitesRoot: string, id: string, tail: string, res: Respo
       return;
     }
     const body = await fs.readFile(target);
+    // The bridge is spliced into HTML at serve time only; files on disk stay
+    // untouched so downloaded zips remain clean. Content-Length follows the
+    // injected body.
+    const out = type.startsWith('text/html')
+      ? Buffer.from(injectBridge(body.toString('utf8'), { contentType: type }), 'utf8')
+      : body;
     res.setHeader('Content-Type', type);
-    res.setHeader('Content-Length', String(body.length));
+    res.setHeader('Content-Length', String(out.length));
     res.setHeader('Content-Security-Policy', PREVIEW_CSP);
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('X-Robots-Tag', 'noindex');
-    res.end(body);
+    res.end(out);
   } catch (err) {
     if (err instanceof SiteError) {
       const status = err.code === 'INVALID_ID' ? 404 : err.status;

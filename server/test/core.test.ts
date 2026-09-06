@@ -202,7 +202,7 @@ describe('createServer', () => {
       await withServer(foundry.app, async (base) => {
         const before = await fetch(`${base}/api/config`);
         expect(before.status).toBe(200);
-        expect(await before.json()).toEqual({ provider: 'mock', endpoint: '', model: 'mock', hasKey: false });
+        expect(await before.json()).toEqual({ provider: 'mock', endpoint: '', model: 'mock', hasKey: false, perRoleModels: {} });
 
         const put = await fetch(`${base}/api/config`, {
           method: 'PUT',
@@ -221,6 +221,7 @@ describe('createServer', () => {
           endpoint: 'https://api.moonshot.cn/v1',
           model: 'kimi-k2',
           hasKey: true,
+          perRoleModels: {},
         });
         expect(JSON.stringify(body)).not.toContain('sk-live-secret');
 
@@ -230,6 +231,7 @@ describe('createServer', () => {
           endpoint: 'https://api.moonshot.cn/v1',
           model: 'kimi-k2',
           hasKey: true,
+          perRoleModels: {},
         });
         expect(await readKey(root)).toBe('sk-live-secret');
       });

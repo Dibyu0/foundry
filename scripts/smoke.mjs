@@ -8,6 +8,10 @@
  * path-traversal confinement, zip download, key hygiene in /api/config, and
  * the HTTP -> HTTPS redirect.
  *
+ * After the base lifecycle it also smokes the wave-2 features: follow-up
+ * edits, checkpoints (list + restore), the share page, fixError, the
+ * serve-time preview bridge, and that the zip download stays bridge-free.
+ *
  * Requires `npm run build` first. Exits non-zero if any step fails.
  */
 import { spawn } from 'node:child_process';
@@ -18,6 +22,7 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { inflateRawSync } from 'node:zlib';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SERVER_ENTRY = join(ROOT, 'server', 'dist', 'index.js');
@@ -27,9 +32,32 @@ const SERVER_ENTRY = join(ROOT, 'server', 'dist', 'index.js');
 const CANARY_KEY = 'foundry-smoke-canary-key-9f8e7d6c5b4a';
 const BRIEF = 'a landing page for a coffee subscription startup';
 
+// Markers for the serve-time preview bridge (BRIDGE area: previewInject.ts).
+// If the shipped marker differs, align this list — the bridge step and the
+// bridge-free-download step both match against it.
+const BRIDGE_MARKERS = [
+  '__FOUNDRY_PREVIEW_BRIDGE__',
+  'foundry-preview-bridge',
+  'data-foundry-bridge',
+  'foundryPreviewBridge',
+];
+const BRIDGE_RE = new RegExp(
+  BRIDGE_MARKERS.map((m) => m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
+  'i',
+);
+
+// Banner signature for the share page (SHARE area: routes/share.ts injects
+// <div id="foundry-share-bar"> with a "Built with Foundry" brand). Align with
+// the shipped banner markup if it carries a different signature.
+const SHARE_BANNER_RE =
+  /(foundry[-\s]?share[-\s]?(?:bar|banner)|data-foundry-share|shared (?:with|via) foundry|(?:made|built) with foundry|share-banner)/i;
+
+const CORE_FILES = ['index.html', 'styles.css', 'app.js'];
+
 const results = [];
 let child = null;
 let dataDir = null;
+const streams = [];
 
 function record(name, ok, detail = '') {
   results.push({ name, ok, detail });
@@ -130,6 +158,135 @@ function planSteps(plan) {
   if (Array.isArray(plan)) return plan;
   if (Array.isArray(plan.steps)) return plan.steps;
   return [];
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Minimal SSE client for /api/builds/:id/events. The hub drops a build's
+// channel when a run reaches DONE, so a stream opened after DONE carries only
+// what the next run (edit / fixError / restore) emits. Callers still drain
+// briefly and mark() before triggering work, in case a previous run re-emitted
+// into a fresh channel that would otherwise replay here and false-pass the
+// "a file event fired" assertions.
+// ?raw=1 asks the hub for the verbatim stream (sse.ts coalesces same-type
+// runs of file/activity into {type:'batch'} frames by default); batch frames
+// are also unwrapped defensively so file events can never hide inside one.
+function openEventStream(port, id) {
+  const events = [];
+  const req = https.request(
+    {
+      host: '127.0.0.1',
+      port,
+      path: `/api/builds/${id}/events?raw=1`,
+      method: 'GET',
+      headers: { accept: 'text/event-stream' },
+      rejectUnauthorized: false,
+      agent: false,
+    },
+    (res) => {
+      let pending = '';
+      res.on('data', (chunk) => {
+        pending += chunk.toString('utf8');
+        let cut;
+        while ((cut = pending.indexOf('\n\n')) !== -1) {
+          const block = pending.slice(0, cut);
+          pending = pending.slice(cut + 2);
+          for (const line of block.split('\n')) {
+            if (!line.startsWith('data:')) continue;
+            try {
+              const parsed = JSON.parse(line.slice(5).trim());
+              if (parsed?.type === 'batch' && Array.isArray(parsed?.events)) events.push(...parsed.events);
+              else events.push(parsed);
+            } catch {
+              /* heartbeat/comment lines carry no data payload */
+            }
+          }
+        }
+      });
+      res.on('error', () => {});
+    },
+  );
+  req.on('error', () => {}); // destroyed deliberately during teardown
+  req.end();
+  return {
+    mark: () => events.length,
+    since: (mark) => events.slice(mark),
+    close: () => req.destroy(),
+  };
+}
+
+// Strips injected bridge tags so content comparisons test the site itself,
+// never the serve-time injection.
+function stripBridge(html) {
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, (tag) => (BRIDGE_RE.test(tag) ? '' : tag))
+    .replace(/<link\b[^>]*>/gi, (tag) => (BRIDGE_RE.test(tag) ? '' : tag));
+}
+
+// Fetches the core site files through the preview route, bridge-stripped.
+async function fetchSiteContents(port, id) {
+  const out = {};
+  for (const name of CORE_FILES) {
+    const res = await rawRequest({ port, path: `/preview/${id}/${name}` });
+    if (res.status !== 200) fail('site snapshot', `GET /preview/${id}/${name} -> ${res.status}`);
+    const text = res.body.toString('utf8');
+    out[name] = name.endsWith('.html') ? stripBridge(text) : text;
+  }
+  return out;
+}
+
+// Minimal zip reader (EOCD -> central directory -> local header -> inflate) so
+// the smoke can inspect index.html inside the download without a dependency.
+function unzipEntry(buf, wanted) {
+  const eocd = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (eocd < 0 || eocd + 22 > buf.length) return null;
+  const count = buf.readUInt16LE(eocd + 10);
+  let off = buf.readUInt32LE(eocd + 16);
+  for (let i = 0; i < count; i += 1) {
+    if (off + 46 > buf.length || buf.readUInt32LE(off) !== 0x02014b50) return null;
+    const method = buf.readUInt16LE(off + 10);
+    const compSize = buf.readUInt32LE(off + 20);
+    const nameLen = buf.readUInt16LE(off + 28);
+    const extraLen = buf.readUInt16LE(off + 30);
+    const commentLen = buf.readUInt16LE(off + 32);
+    const localOff = buf.readUInt32LE(off + 42);
+    const name = buf.toString('utf8', off + 46, off + 46 + nameLen);
+    if (name === wanted) {
+      if (localOff + 30 > buf.length || buf.readUInt32LE(localOff) !== 0x04034b50) return null;
+      const dataStart = localOff + 30 + buf.readUInt16LE(localOff + 26) + buf.readUInt16LE(localOff + 28);
+      const data = buf.subarray(dataStart, dataStart + compSize);
+      if (method === 0) return Buffer.from(data);
+      if (method === 8) {
+        try {
+          return inflateRawSync(data);
+        } catch {
+          return null;
+        }
+      }
+      return null;
+    }
+    off += 46 + nameLen + extraLen + commentLen;
+  }
+  return null;
+}
+
+function checkpointList(json) {
+  if (Array.isArray(json)) return json;
+  if (json && Array.isArray(json.checkpoints)) return json.checkpoints;
+  return [];
+}
+
+// Checkpoint identity on the wire (routes/checkpoints.ts) is the 1-based
+// sequence number `n`; id/checkpointId/name are tolerated alternate shapes.
+function checkpointIdOf(cp) {
+  return cp?.n ?? cp?.id ?? cp?.checkpointId ?? cp?.name;
+}
+
+function checkpointTsOf(cp) {
+  const n = Number(cp?.createdAt ?? cp?.ts ?? cp?.time ?? cp?.created ?? 0);
+  return Number.isFinite(n) ? n : 0;
 }
 
 async function main() {
@@ -332,12 +489,171 @@ async function main() {
       fail('redirect', `GET http port -> ${redir.status} location=${location} (expected 301 to https://…)`);
     }
     record('HTTP port 301-redirects to HTTPS', true, location);
+
+    // === wave-2 features ==================================================
+    // Baseline snapshot of the finished site, taken before any follow-up
+    // work; the checkpoint restore below must reproduce exactly these bytes
+    // (compared bridge-stripped, since the bridge is serve-time only).
+    const preEdit = await fetchSiteContents(httpsPort, id);
+    const indexNow = await rawRequest({ port: httpsPort, path: `/preview/${id}/` });
+    const titleMatch = /<title[^>]*>([^<]+)<\/title>/i.exec(indexNow.body.toString('utf8'));
+    if (!titleMatch) fail('site snapshot', 'index.html has no <title> to check the share page against');
+    const siteTitle = titleMatch[1].trim();
+
+    // (a) follow-up edit: DONE -> edit run -> DONE again, with a file event.
+    const editStream = openEventStream(httpsPort, id);
+    streams.push(editStream);
+    await sleep(400); // drain any replay before marking
+    const editMark = editStream.mark();
+    const edit = await apiJson({
+      method: 'POST',
+      port: httpsPort,
+      path: `/api/builds/${id}/edit`,
+      json: { instruction: 'Make the hero headline punchier and add a FAQ entry about delivery areas.' },
+    });
+    if (edit.status < 200 || edit.status >= 300) {
+      fail('follow-up edit', `POST edit -> ${edit.status}: ${edit.text.slice(0, 200)}`);
+    }
+    const editRun = await waitFor(
+      'follow-up edit',
+      async () => {
+        const s = await getState();
+        const live = editStream.since(editMark);
+        const sawFile = live.some((e) => e?.type === 'file');
+        const sawDone = live.some((e) => (e?.type === 'phase' && e?.phase === 'DONE') || e?.type === 'done');
+        return s.phase === 'DONE' && sawFile && sawDone ? { s, live } : null;
+      },
+      60_000,
+      600,
+    );
+    const afterEdit = await fetchSiteContents(httpsPort, id);
+    const editChanged = CORE_FILES.filter((n) => afterEdit[n] !== preEdit[n]);
+    // An edit may also prove itself by adding a brand-new file (reported by a
+    // file event whose path was not in the pre-edit core set).
+    const added = editRun.live
+      .filter((e) => e?.type === 'file' && typeof e?.file?.path === 'string')
+      .map((e) => e.file.path)
+      .filter((p) => !CORE_FILES.includes(p));
+    if (editChanged.length === 0 && added.length === 0) {
+      fail('follow-up edit', 'DONE + file event observed, but the site contents did not change');
+    }
+    const editDetail = [...editChanged.map((n) => `changed ${n}`), ...added.map((n) => `added ${n}`)];
+    record('follow-up edit returns to DONE with a file event', true, editDetail.join(', '));
+
+    // (b) checkpoints: the list shows >= 1 entry after DONE, and restoring
+    // the pre-edit snapshot brings the site back to the baseline. The
+    // pre-edit checkpoint is the one labeled 'build' (routes/checkpoints.ts
+    // sorts by ascending n, so the earliest entry is the fallback).
+    const cps = await apiJson({ port: httpsPort, path: `/api/builds/${id}/checkpoints` });
+    if (cps.status !== 200) {
+      fail('checkpoints', `GET checkpoints -> ${cps.status}: ${cps.text.slice(0, 200)}`);
+    }
+    const cpList = checkpointList(cps.json);
+    if (cpList.length < 1) fail('checkpoints', 'expected >= 1 checkpoint after DONE, got 0');
+    record('checkpoints list shows >= 1 checkpoint after DONE', true, `${cpList.length} checkpoint(s)`);
+    const oldest =
+      cpList.find((cp) => cp?.label === 'build') ??
+      [...cpList].sort((a, b) => checkpointTsOf(a) - checkpointTsOf(b))[0];
+    const cpId = checkpointIdOf(oldest);
+    if (cpId === undefined || cpId === null || cpId === '') {
+      fail('checkpoints', `checkpoint entry carries no id: ${JSON.stringify(oldest).slice(0, 200)}`);
+    }
+    let restored = await apiJson({
+      method: 'POST',
+      port: httpsPort,
+      path: `/api/builds/${id}/checkpoints/${encodeURIComponent(String(cpId))}/restore`,
+      json: {},
+    });
+    if (restored.status === 404) {
+      // Alternate contract shape: checkpoint id in the body, not the path.
+      restored = await apiJson({
+        method: 'POST',
+        port: httpsPort,
+        path: `/api/builds/${id}/checkpoints/restore`,
+        json: { checkpointId: cpId },
+      });
+    }
+    if (restored.status !== 200) {
+      fail('checkpoints', `restore -> ${restored.status}: ${restored.text.slice(0, 200)}`);
+    }
+    const afterRestore = await fetchSiteContents(httpsPort, id);
+    const mismatch = CORE_FILES.filter((n) => afterRestore[n] !== preEdit[n]);
+    if (mismatch.length > 0) {
+      fail('checkpoints', `restored files differ from the checkpoint snapshot: ${mismatch.join(', ')}`);
+    }
+    record('checkpoint restore returns 200 and files match the snapshot', true, `id=${String(cpId).slice(0, 16)}`);
+
+    // (c) share page: the banner plus the site's original <title>.
+    const share = await rawRequest({ port: httpsPort, path: `/p/${id}/` });
+    const shareHtml = share.body.toString('utf8');
+    const shareCtype = String(share.headers['content-type'] ?? '');
+    if (share.status !== 200 || !shareCtype.includes('text/html')) {
+      fail('share', `GET /p/${id}/ -> ${share.status} content-type=${shareCtype}`);
+    }
+    if (!SHARE_BANNER_RE.test(shareHtml)) {
+      fail('share', 'no Foundry banner marker in the share page — align SHARE_BANNER_RE with routes/share.ts');
+    }
+    if (!shareHtml.includes(siteTitle)) {
+      fail('share', `share page lost the original title ${JSON.stringify(siteTitle)}`);
+    }
+    record('GET /p/<id>/ serves the banner + original title', true, `title=${JSON.stringify(siteTitle).slice(0, 70)}`);
+
+    // (d) fixError: an accepted response, then the build reaches DONE again.
+    const fixStream = openEventStream(httpsPort, id);
+    streams.push(fixStream);
+    await sleep(400);
+    const fixMark = fixStream.mark();
+    const fix = await apiJson({
+      method: 'POST',
+      port: httpsPort,
+      path: `/api/builds/${id}/fixError`,
+      json: {
+        message: "Uncaught TypeError: Cannot read properties of null (reading 'classList')",
+        file: 'app.js',
+        line: 87,
+      },
+    });
+    if (fix.status < 200 || fix.status >= 300) {
+      fail('fixError', `POST fixError -> ${fix.status}: ${fix.text.slice(0, 200)}`);
+    }
+    await waitFor(
+      'fixError',
+      async () => {
+        const s = await getState();
+        const sawDone = fixStream
+          .since(fixMark)
+          .some((e) => (e?.type === 'phase' && e?.phase === 'DONE') || e?.type === 'done');
+        return s.phase === 'DONE' && sawDone ? s : null;
+      },
+      60_000,
+      600,
+    );
+    record('POST fixError is accepted and the build reaches DONE', true, `status=${fix.status}`);
+
+    // (e) preview bridge: the served HTML carries the injected marker.
+    const bridged = await rawRequest({ port: httpsPort, path: `/preview/${id}/` });
+    if (bridged.status !== 200) fail('preview bridge', `GET /preview/${id}/ -> ${bridged.status}`);
+    if (!BRIDGE_RE.test(bridged.body.toString('utf8'))) {
+      fail('preview bridge', `no bridge marker in served HTML (looked for ${BRIDGE_MARKERS.join(', ')})`);
+    }
+    record('GET /preview/<id>/ contains the injected bridge marker', true);
+
+    // (f) the zip download stays clean: bridge injection is serve-time only.
+    const zip2 = await rawRequest({ port: httpsPort, path: `/api/builds/${id}/download` });
+    if (zip2.status !== 200) fail('download', `GET download (post-edit) -> ${zip2.status}`);
+    const zipIndex = unzipEntry(zip2.body, 'index.html');
+    if (zipIndex === null) fail('download', 'index.html not readable inside the downloaded zip');
+    if (BRIDGE_RE.test(zipIndex.toString('utf8'))) {
+      fail('download', 'downloaded index.html contains the bridge script — injection must be serve-time only');
+    }
+    record('downloaded index.html is bridge-free (serve-time injection only)', true, `${zipIndex.length} bytes`);
   } catch (err) {
     record(err instanceof Error ? err.message.split(':')[0] : 'smoke', false, err instanceof Error ? err.message : String(err));
     if (serverLog.trim()) {
       console.error('\n----- server log -----\n' + serverLog.trimEnd() + '\n----------------------');
     }
   } finally {
+    for (const s of streams) s.close();
     if (child && !child.killed) child.kill();
     if (dataDir) {
       try {

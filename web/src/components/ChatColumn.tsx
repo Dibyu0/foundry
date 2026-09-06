@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChatMessage } from '../types';
 import type { ReactNode } from 'react';
+import { ChatComposer } from './ChatComposer';
 
 interface ChatColumnProps {
   hasBuild: boolean;
@@ -8,11 +9,21 @@ interface ChatColumnProps {
   messages: ChatMessage[];
   sending: boolean;
   onSend: (brief: string) => Promise<boolean>;
+  /** Cancel the running build, then send immediately. Enables 'Send now' on queued items and the draft. */
+  onSendNow?: (brief: string) => Promise<boolean>;
+  /** Sender for auto-drained queued prompts (e.g. a follow-up edit). Defaults to onSend. */
+  onSendQueued?: (text: string) => Promise<boolean>;
+  /** Extra gate for queue auto-draining (e.g. phase === 'DONE'); defaults to !running. */
+  canDrain?: boolean;
+  /** File paths of the current build, offered as @-mentions in the composer. */
+  mentionFiles?: string[];
   composerRef: React.RefObject<HTMLTextAreaElement>;
   /** changes when inline cards (question/plan) appear or disappear */
   feedKey: string;
   children?: ReactNode;
 }
+
+const NO_FILES: string[] = [];
 
 const SUGGESTIONS = [
   'A landing page for a small coffee roastery with a menu and a contact form',
@@ -20,7 +31,20 @@ const SUGGESTIONS = [
   'A docs-style site for a CLI tool with a sidebar and code examples',
 ];
 
-export function ChatColumn({ hasBuild, running, messages, sending, onSend, composerRef, feedKey, children }: ChatColumnProps) {
+export function ChatColumn({
+  hasBuild,
+  running,
+  messages,
+  sending,
+  onSend,
+  onSendNow,
+  onSendQueued,
+  canDrain,
+  mentionFiles = NO_FILES,
+  composerRef,
+  feedKey,
+  children,
+}: ChatColumnProps) {
   const [brief, setBrief] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
   const stuckRef = useRef(true);
@@ -36,22 +60,6 @@ export function ChatColumn({ hasBuild, running, messages, sending, onSend, compo
     stuckRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
   }
 
-  const canSend = brief.trim().length > 0 && !sending && !running;
-
-  async function send() {
-    if (!canSend) return;
-    const text = brief.trim();
-    const ok = await onSend(text);
-    if (ok) setBrief('');
-  }
-
-  function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      void send();
-    }
-  }
-
   return (
     <div className="chat-inner">
       <div className="messages" ref={listRef} onScroll={onListScroll} aria-label="Conversation" aria-live="polite">
@@ -64,7 +72,7 @@ export function ChatColumn({ hasBuild, running, messages, sending, onSend, compo
                   <button
                     type="button"
                     className="suggestion"
-                    disabled={sending || running}
+                    disabled={sending}
                     onClick={() => {
                       setBrief(s);
                       composerRef.current?.focus();
@@ -88,27 +96,18 @@ export function ChatColumn({ hasBuild, running, messages, sending, onSend, compo
         {children}
       </div>
 
-      <div className="composer">
-        <textarea
-          ref={composerRef}
-          className="composer-input"
-          placeholder={running ? 'A build is running…' : 'Describe the website you want…'}
-          value={brief}
-          onChange={(e) => setBrief(e.target.value)}
-          onKeyDown={onKeyDown}
-          disabled={running || sending}
-          rows={3}
-          aria-label="Website brief"
-        />
-        <div className="composer-bar">
-          <span className="muted composer-hint">
-            {running ? 'Cancel or wait for the build to finish' : 'Ctrl+Enter to send'}
-          </span>
-          <button type="button" className="btn btn--primary" disabled={!canSend} onClick={() => void send()}>
-            {sending ? 'Starting…' : 'Build it'}
-          </button>
-        </div>
-      </div>
+      <ChatComposer
+        running={running}
+        sending={sending}
+        draft={brief}
+        onDraftChange={setBrief}
+        mentionFiles={mentionFiles}
+        onSend={onSend}
+        onSendNow={onSendNow}
+        onSendQueued={onSendQueued}
+        canDrain={canDrain}
+        composerRef={composerRef}
+      />
     </div>
   );
 }

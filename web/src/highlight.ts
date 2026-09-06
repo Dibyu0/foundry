@@ -45,13 +45,7 @@ function runGroups(src: string, defs: GroupDef[]): Token[] {
   return tokens;
 }
 
-const JS_DEFS: GroupDef[] = [
-  { name: 'comment', re: /\/\/[^\n]*|\/\*[\s\S]*?\*\//, cls: 'tok-c' },
-  {
-    name: 'string',
-    re: /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/,
-    cls: 'tok-s',
-  },
+const JS_CODE_DEFS: GroupDef[] = [
   {
     name: 'keyword',
     re: /\b(?:const|let|var|function|return|if|else|for|while|do|break|continue|new|class|extends|super|this|typeof|instanceof|in|of|try|catch|finally|throw|switch|case|default|import|export|from|as|async|await|yield|static|get|set|null|undefined|true|false|void|delete)\b/,
@@ -61,6 +55,131 @@ const JS_DEFS: GroupDef[] = [
   { name: 'call', re: /[A-Za-z_$][\w$]*(?=\s*\()/, cls: 'tok-f' },
   { name: 'prop', re: /\.[A-Za-z_$][\w$]*/, cls: 'tok-a' },
 ];
+
+type JsState = 'code' | 'sq' | 'dq' | 'tpl' | 'line-comment' | 'block-comment';
+
+/** State-machine tokenizer for js: strings ('' ""), template literals with
+ *  ${} expressions (nestable), line/block comments and escapes are tracked as
+ *  explicit states; plain code spans go through the keyword/number groups. */
+function tokenizeJs(src: string): Token[] {
+  const tokens: Token[] = [];
+  let state: JsState = 'code';
+  let segStart = 0;
+  let depth = 0;
+  // brace depth of each open ${ — when a } brings depth back to it, the
+  // template expression is over and the literal resumes
+  const tplExpr: number[] = [];
+  const flushCode = (end: number) => {
+    if (end > segStart) tokens.push(...runGroups(src.slice(segStart, end), JS_CODE_DEFS));
+  };
+  const flush = (cls: string, end: number) => {
+    if (end > segStart) tokens.push({ text: src.slice(segStart, end), cls });
+  };
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    const next = src[i + 1];
+    if (state === 'code') {
+      if (c === '/' && next === '/') {
+        flushCode(i);
+        state = 'line-comment';
+        segStart = i;
+        i += 2;
+        continue;
+      }
+      if (c === '/' && next === '*') {
+        flushCode(i);
+        state = 'block-comment';
+        segStart = i;
+        i += 2;
+        continue;
+      }
+      if (c === "'" || c === '"' || c === '`') {
+        flushCode(i);
+        state = c === "'" ? 'sq' : c === '"' ? 'dq' : 'tpl';
+        segStart = i;
+        i += 1;
+        continue;
+      }
+      if (c === '{') depth += 1;
+      if (c === '}') {
+        if (tplExpr.length > 0 && depth === tplExpr[tplExpr.length - 1]) {
+          flushCode(i);
+          tplExpr.pop();
+          state = 'tpl';
+          segStart = i;
+          i += 1;
+          continue;
+        }
+        if (depth > 0) depth -= 1;
+      }
+      i += 1;
+      continue;
+    }
+    if (state === 'sq' || state === 'dq') {
+      if (c === '\\') {
+        i += 2;
+        continue;
+      }
+      if (c === (state === 'sq' ? "'" : '"')) {
+        flush('tok-s', i + 1);
+        state = 'code';
+        segStart = i + 1;
+      } else if (c === '\n') {
+        // unterminated string: JS source lines cannot carry a raw quote across
+        flush('tok-s', i);
+        state = 'code';
+        segStart = i;
+      }
+      i += 1;
+      continue;
+    }
+    if (state === 'tpl') {
+      if (c === '\\') {
+        i += 2;
+        continue;
+      }
+      if (c === '`') {
+        flush('tok-s', i + 1);
+        state = 'code';
+        segStart = i + 1;
+        i += 1;
+        continue;
+      }
+      if (c === '$' && next === '{') {
+        flush('tok-s', i + 2);
+        tplExpr.push(depth);
+        state = 'code';
+        segStart = i + 2;
+        i += 2;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    if (state === 'line-comment') {
+      if (c === '\n') {
+        flush('tok-c', i);
+        state = 'code';
+        segStart = i;
+      }
+      i += 1;
+      continue;
+    }
+    // block-comment
+    if (c === '*' && next === '/') {
+      flush('tok-c', i + 2);
+      state = 'code';
+      segStart = i + 2;
+      i += 2;
+      continue;
+    }
+    i += 1;
+  }
+  if (state === 'code') flushCode(src.length);
+  else flush(state === 'line-comment' || state === 'block-comment' ? 'tok-c' : 'tok-s', src.length);
+  return tokens;
+}
 
 const CSS_DEFS: GroupDef[] = [
   { name: 'comment', re: /\/\*[\s\S]*?\*\//, cls: 'tok-c' },
@@ -179,6 +298,6 @@ export function tokensToLines(tokens: Token[]): Token[][] {
 export function highlightLines(content: string, lang: Lang): Token[][] {
   if (lang === 'html') return tokensToLines(tokenizeHtml(content));
   if (lang === 'css') return tokensToLines(runGroups(content, CSS_DEFS));
-  if (lang === 'js') return tokensToLines(runGroups(content, JS_DEFS));
+  if (lang === 'js') return tokensToLines(tokenizeJs(content));
   return tokensToLines([{ text: content, cls: null }]);
 }

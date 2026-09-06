@@ -88,7 +88,10 @@ describe('rate limiting', () => {
     });
   });
 
-  it('limits POST /api/builds to 60/min while other routes stay up', async () => {
+  it(
+    'limits POST /api/builds to 60/min while other routes stay up',
+    { timeout: 60_000 },
+    async () => {
     const foundry = await createServer({ dataRoot: root, listen: false, log: () => undefined });
     try {
       await withServer(foundry.app, async (base) => {

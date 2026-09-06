@@ -40,20 +40,36 @@ export class ProviderError extends Error {
 export type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 export type KeyReader = () => string | null | undefined | Promise<string | null | undefined>;
 
+/**
+ * Reads the raw persisted provider config (foundry.config.json) as an
+ * untyped object. Carries the opt-in hints the typed config reader may
+ * predate (perRoleModels, aiCacheRetention); absent keys mean "no hint".
+ */
+export type RawConfigReader = () =>
+  | Record<string, unknown>
+  | null
+  | undefined
+  | Promise<Record<string, unknown> | null | undefined>;
+
 export interface HttpProviderConfig {
   endpoint?: string;
   model?: string;
   getKey?: KeyReader;
+  getRawConfig?: RawConfigReader;
   fetchImpl?: FetchLike;
   timeoutMs?: number;
   maxRetries?: number;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
+  /** Clock for the retry wall-clock budget; tests inject a fake. */
+  now?: () => number;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_RETRIES = 2;
-const RETRY_AFTER_CAP_MS = 10_000;
+const RETRY_AFTER_CAP_MS = 30_000;
+const MAX_RETRY_AFTER_WAITS = 2;
+const RETRY_WALL_CLOCK_CAP_MS = 300_000;
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 4_000;
 const JITTER_MS = 250;
@@ -82,6 +98,7 @@ interface Hooks {
   fetchImpl: FetchLike;
   sleep: (ms: number) => Promise<void>;
   random: () => number;
+  now: () => number;
   timeoutMs: number;
   maxRetries: number;
   key: string | null;
@@ -115,16 +132,32 @@ async function readBodyCapped(stream: ReadableStream<Uint8Array>, cap: number): 
   return out;
 }
 
-function retryDelayMs(h: Hooks, retryIndex: number, retryAfterHeader: string | null): number {
-  if (retryAfterHeader !== null) {
+interface RetryDelay {
+  delay: number;
+  usedRetryAfter: boolean;
+}
+
+function retryDelayMs(
+  h: Hooks,
+  retryIndex: number,
+  retryAfterHeader: string | null,
+  retryAfterWaitsUsed: number,
+): RetryDelay {
+  // Retry-After is honored at most MAX_RETRY_AFTER_WAITS times per request;
+  // beyond that plain backoff takes over so a stubborn 429 cannot pin the
+  // loop to the server's schedule. Honored waits are jittered too, keeping
+  // concurrent builds from retrying in lockstep.
+  if (retryAfterHeader !== null && retryAfterWaitsUsed < MAX_RETRY_AFTER_WAITS) {
     const seconds = Number(retryAfterHeader);
     if (Number.isFinite(seconds) && seconds >= 0) {
       const ms = seconds * 1000;
-      if (ms <= RETRY_AFTER_CAP_MS) return ms;
+      if (ms <= RETRY_AFTER_CAP_MS) {
+        return { delay: ms + Math.floor(h.random() * JITTER_MS), usedRetryAfter: true };
+      }
     }
   }
   const exp = Math.min(BACKOFF_BASE_MS * 2 ** retryIndex, BACKOFF_CAP_MS);
-  return exp + Math.floor(h.random() * JITTER_MS);
+  return { delay: exp + Math.floor(h.random() * JITTER_MS), usedRetryAfter: false };
 }
 
 async function postJson(h: Hooks, url: string, payload: unknown, callerSignal?: AbortSignal): Promise<HttpResult> {
@@ -132,7 +165,22 @@ async function postJson(h: Hooks, url: string, payload: unknown, callerSignal?: 
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (h.key) headers.authorization = `Bearer ${h.key}`;
 
+  const startedAt = h.now();
+  let retryAfterWaits = 0;
   let lastError: Error | null = null;
+
+  // Sleeps before the next retry, or returns false once the 5-minute
+  // wall-clock budget for the whole retry sequence is spent — the caller
+  // then surfaces the current error instead of scheduling another attempt.
+  async function sleepForRetry(retryIndex: number, retryAfterHeader: string | null): Promise<boolean> {
+    const plan = retryDelayMs(h, retryIndex, retryAfterHeader, retryAfterWaits);
+    const elapsed = h.now() - startedAt;
+    if (elapsed >= RETRY_WALL_CLOCK_CAP_MS || elapsed + plan.delay > RETRY_WALL_CLOCK_CAP_MS) return false;
+    if (plan.usedRetryAfter) retryAfterWaits += 1;
+    await h.sleep(plan.delay);
+    return true;
+  }
+
   for (let attempt = 0; attempt <= h.maxRetries; attempt += 1) {
     if (callerSignal?.aborted) throw new AbortError();
     const controller = new AbortController();
@@ -165,8 +213,7 @@ async function postJson(h: Hooks, url: string, payload: unknown, callerSignal?: 
         : await res.text().catch(() => '');
       const detail = truncate(scrub(rawBody, [h.key]), ERROR_BODY_MAX);
       const retryable = res.status === 429 || res.status >= 500;
-      if (retryable && attempt < h.maxRetries) {
-        await h.sleep(retryDelayMs(h, attempt, res.headers.get('retry-after')));
+      if (retryable && attempt < h.maxRetries && (await sleepForRetry(attempt, res.headers.get('retry-after')))) {
         continue;
       }
       throw new ProviderError(`request failed with status ${res.status}: ${detail}`, res.status);
@@ -178,8 +225,7 @@ async function postJson(h: Hooks, url: string, payload: unknown, callerSignal?: 
         ? `request timed out after ${h.timeoutMs}ms`
         : `network error: ${scrub(errMsg(e), [h.key])}`;
       lastError = new ProviderError(msg);
-      if (attempt < h.maxRetries) {
-        await h.sleep(retryDelayMs(h, attempt, null));
+      if (attempt < h.maxRetries && (await sleepForRetry(attempt, null))) {
         continue;
       }
       throw lastError;
@@ -282,6 +328,120 @@ async function resolveDefaultKey(): Promise<string | null> {
   return null;
 }
 
+/**
+ * Reads foundry.config.json as an untyped object, tolerating anything
+ * missing or unreadable. The typed config reader owns honest errors for the
+ * fields it knows; this raw read exists so the opt-in hints below keep
+ * working whether or not the config module has caught up to them yet.
+ */
+async function readRawProviderConfig(): Promise<Record<string, unknown> | null> {
+  try {
+    const configPath = path.resolve(
+      process.env.FOUNDRY_DATA_DIR ?? path.resolve(process.cwd(), 'data'),
+      'foundry.config.json',
+    );
+    const parsed: unknown = JSON.parse(await readFile(configPath, 'utf8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // absent or unreadable config: no hints, the defaults apply
+  }
+  return null;
+}
+
+function rawConfigReader(config: HttpProviderConfig): () => Promise<Record<string, unknown> | null> {
+  return async () => {
+    if (config.getRawConfig) return (await config.getRawConfig()) ?? null;
+    return readRawProviderConfig();
+  };
+}
+
+/** The perRoleModels map from raw config, reduced to the four overridable roles. */
+function perRoleModelsFrom(raw: Record<string, unknown> | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  const value = raw?.['perRoleModels'];
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const rec = value as Record<string, unknown>;
+    for (const role of ['design', 'copy', 'builder', 'reviewer']) {
+      const model = rec[role];
+      if (typeof model === 'string' && model.trim() !== '') out[role] = model;
+    }
+  }
+  return out;
+}
+
+/**
+ * The cacheRetention hint for the Kimi request body, passed through verbatim
+ * from the aiCacheRetention config key: a retention label, a seconds count,
+ * or true to ask for the provider default. Absent, false or empty means the
+ * field stays off the wire entirely.
+ */
+function cacheRetentionFrom(raw: Record<string, unknown> | null): string | number | true | undefined {
+  const value = raw?.['aiCacheRetention'];
+  if (value === true) return true;
+  if (typeof value === 'string' && value.trim() !== '') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  return undefined;
+}
+
+/** Picks the model for one call: the per-role override when configured, else the provider default. */
+function modelForCall(raw: Record<string, unknown> | null, messages: ChatMessage[], fallback: string): string {
+  const role = roleFromMessages(messages);
+  if (role === null) return fallback;
+  const override = perRoleModelsFrom(raw)[role];
+  const chosen = override ?? fallback;
+  console.debug(`[foundry] ${role} call routed to model ${chosen}${override !== undefined ? ' (per-role override)' : ''}`);
+  return chosen;
+}
+
+/**
+ * Role prompts carry a [role:...] marker in the system message; the mock
+ * provider's script dispatch and the per-role model override both key off it.
+ */
+const ROLE_MARKER = /\[role:(planner|design|copy|builder|reviewer)\]/;
+
+/** The [role:...] marker of the last system message, or null when absent. */
+export function roleFromMessages(messages: ChatMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m && m.role === 'system') {
+      const match = ROLE_MARKER.exec(m.content);
+      if (match) return match[1] ?? null;
+    }
+  }
+  return null;
+}
+
+// Blocks whose content changes from run to run inside a build (the brief,
+// answers, plan, files list, the planner's round counter and the builder's
+// per-pass contract). Everything else in the role prompts — role intro, tool
+// convention, the premium recipe — is byte-stable across calls.
+const PER_RUN_BLOCK = /^(?:SITE BRIEF \(from the user\)|CLARIFYING ANSWERS|APPROVED PLAN|PLAN\n|FILES WRITTEN SO FAR|FIX PASS\n|REMAINING FILES\n|OUTPUT CONTRACT\n|RULES\n)/;
+
+/**
+ * Reorders a role system prompt for provider-side prefix caching. Providers
+ * cache prompts from the left edge: the longest shared leading span is reused
+ * across calls and only the differing tail is re-tokenized. The role prompts
+ * are authored with the per-run content (brief, answers, plan, files) up
+ * front and the shared premium recipe after it, which defeats that cache —
+ * two calls in the same build share almost no leading tokens. Moving the
+ * per-run blocks to the end makes the role intro, tool convention and the
+ * whole recipe one stable prefix shared by every role call in every build.
+ * No content is added or dropped; only block order changes.
+ */
+export function orderSystemContentForPrefixCaching(content: string): string {
+  if (!content.includes('\n\n')) return content;
+  const blocks = content.split('\n\n');
+  const stable: string[] = [];
+  const perRun: string[] = [];
+  for (const block of blocks) {
+    (PER_RUN_BLOCK.test(block) ? perRun : stable).push(block);
+  }
+  if (perRun.length === 0 || stable.length === 0) return content;
+  return [...stable, ...perRun].join('\n\n');
+}
+
 interface WireMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
@@ -291,9 +451,11 @@ function toWireMessages(messages: ChatMessage[]): WireMessage[] {
   // Prompt-based tool convention: tool results ride as user messages. Most
   // OpenAI-compatible servers reject role:"tool" without a tool_call_id, and
   // local Ollama models handle user-role context more reliably.
+  // System prompts pass through the prefix-cache reorder so the shared
+  // recipe leads and the per-run tail trails on the wire.
   return messages.map((m) => ({
     role: m.role === 'tool' ? 'user' : m.role,
-    content: m.content,
+    content: m.role === 'system' ? orderSystemContentForPrefixCaching(m.content) : m.content,
   }));
 }
 
@@ -327,10 +489,12 @@ export function createKimiProvider(config: HttpProviderConfig = {}): Provider {
   const endpoint = config.endpoint ?? KIMI_DEFAULT_ENDPOINT;
   const model = config.model ?? KIMI_DEFAULT_MODEL;
   const url = joinUrl(endpoint, '/chat/completions');
+  const readRaw = rawConfigReader(config);
   const base = {
     fetchImpl: config.fetchImpl ?? (fetch as FetchLike),
     sleep: config.sleep ?? realSleep,
     random: config.random ?? Math.random,
+    now: config.now ?? Date.now,
     timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
   };
@@ -343,11 +507,18 @@ export function createKimiProvider(config: HttpProviderConfig = {}): Provider {
     return { ...base, key };
   }
 
-  function payload(messages: ChatMessage[], streaming: boolean, opts?: CallOptions) {
+  function payload(
+    messages: ChatMessage[],
+    streaming: boolean,
+    opts: CallOptions | undefined,
+    raw: Record<string, unknown> | null,
+  ) {
+    const retention = cacheRetentionFrom(raw);
     return {
-      model,
+      model: modelForCall(raw, messages, model),
       messages: toWireMessages(messages),
       stream: streaming,
+      ...(retention !== undefined ? { cacheRetention: retention } : {}),
       ...(opts?.temperature !== undefined ? { temperature: opts.temperature } : {}),
       ...(opts?.maxTokens !== undefined ? { max_tokens: opts.maxTokens } : {}),
     };
@@ -356,7 +527,7 @@ export function createKimiProvider(config: HttpProviderConfig = {}): Provider {
   return {
     async complete(messages, opts) {
       const h = await hooks();
-      const res = await postJson(h, url, payload(messages, false, opts), opts?.signal);
+      const res = await postJson(h, url, payload(messages, false, opts, await readRaw()), opts?.signal);
       if (res.body === null) throw new ProviderError('malformed response: missing body');
       let parsed: unknown;
       try {
@@ -369,7 +540,7 @@ export function createKimiProvider(config: HttpProviderConfig = {}): Provider {
 
     async stream(messages, onDelta, opts) {
       const h = await hooks();
-      const res = await postJson(h, url, payload(messages, true, opts), opts?.signal);
+      const res = await postJson(h, url, payload(messages, true, opts, await readRaw()), opts?.signal);
       if (!res.stream) throw new ProviderError('malformed response: missing stream');
       let full = '';
       await readSseData(res.stream, (data) => {
@@ -397,21 +568,28 @@ export function createOllamaProvider(config: HttpProviderConfig = {}): Provider 
   const endpoint = config.endpoint ?? OLLAMA_DEFAULT_ENDPOINT;
   const model = config.model ?? OLLAMA_DEFAULT_MODEL;
   const url = joinUrl(endpoint, '/api/chat');
+  const readRaw = rawConfigReader(config);
   const base: Hooks = {
     fetchImpl: config.fetchImpl ?? (fetch as FetchLike),
     sleep: config.sleep ?? realSleep,
     random: config.random ?? Math.random,
+    now: config.now ?? Date.now,
     timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
     key: null,
   };
 
-  function payload(messages: ChatMessage[], streaming: boolean, opts?: CallOptions) {
+  function payload(
+    messages: ChatMessage[],
+    streaming: boolean,
+    opts: CallOptions | undefined,
+    raw: Record<string, unknown> | null,
+  ) {
     const options: Record<string, number> = {};
     if (opts?.temperature !== undefined) options.temperature = opts.temperature;
     if (opts?.maxTokens !== undefined) options.num_predict = opts.maxTokens;
     return {
-      model,
+      model: modelForCall(raw, messages, model),
       messages: toWireMessages(messages),
       stream: streaming,
       ...(Object.keys(options).length > 0 ? { options } : {}),
@@ -420,7 +598,7 @@ export function createOllamaProvider(config: HttpProviderConfig = {}): Provider 
 
   return {
     async complete(messages, opts) {
-      const res = await postJson(base, url, payload(messages, false, opts), opts?.signal);
+      const res = await postJson(base, url, payload(messages, false, opts, await readRaw()), opts?.signal);
       if (res.body === null) throw new ProviderError('malformed response: missing body');
       let parsed: unknown;
       try {
@@ -443,7 +621,7 @@ export function createOllamaProvider(config: HttpProviderConfig = {}): Provider 
     },
 
     async stream(messages, onDelta, opts) {
-      const res = await postJson(base, url, payload(messages, true, opts), opts?.signal);
+      const res = await postJson(base, url, payload(messages, true, opts, await readRaw()), opts?.signal);
       if (!res.stream) throw new ProviderError('malformed response: missing stream');
       let full = '';
       await parseSseLines(res.stream, (line) => {
@@ -471,8 +649,6 @@ export function createOllamaProvider(config: HttpProviderConfig = {}): Provider 
     },
   };
 }
-
-const ROLE_MARKER = /\[role:(planner|design|copy|builder|reviewer)\]/;
 
 const MOCK_STYLES = `/* Aurora Coffee - design system.
    Dark metallic surfaces, glass, aurora gradient accents, fluid type. */
@@ -1443,6 +1619,20 @@ const MOCK_INDEX_FIXED = MOCK_INDEX.replace(
   'type="button" aria-label="Toggle navigation" aria-expanded="false" aria-controls="navLinks"',
 );
 
+// Follow-up edits must prove themselves: the edited variant adds a real
+// FAQ entry (matching the blueprint's faq-item markup) so the file always
+// differs from both MOCK_INDEX and MOCK_INDEX_FIXED on disk.
+const MOCK_INDEX_EDITED = MOCK_INDEX_FIXED.replace(
+  '</main>',
+  [
+    '        <details class="faq-item reveal">',
+    '          <summary>Which delivery areas do you ship to?</summary>',
+    '          <p>We currently roast and ship across Norway and the wider EU, with tracked delivery included on every plan.</p>',
+    '        </details>',
+    '  </main>',
+  ].join('\n'),
+);
+
 const MOCK_APP = `/* Aurora Coffee - progressive enhancement. The page is fully usable without it. */
 (function () {
   'use strict';
@@ -1643,6 +1833,10 @@ const MOCK_APP = `/* Aurora Coffee - progressive enhancement. The page is fully 
 })();
 `;
 
+const MOCK_APP_FIXED = `// Error-fix pass: a guard around the counters so a malformed
+// data-count value can no longer throw and stop the rest of app.js.
+${MOCK_APP.replace('querySelectorAll', 'querySelectorAll /* guarded */')}`;
+
 const MOCK_README = `# Aurora Coffee
 
 A single-page marketing site for Aurora Coffee, a fictional small-batch coffee
@@ -1773,6 +1967,20 @@ function mockBuilderResponse(messages: ChatMessage[]): string {
       JSON.stringify({ tool: 'writeFile', args: { path: 'index.html', content: MOCK_INDEX_FIXED } }),
     ].join('\n');
   }
+  // Follow-up edits and error fixes must produce a CHANGED file (the
+  // orchestrator measures the edit by file events).
+  if (lastUser.includes('Apply this edit now') || sys.includes('TARGETED EDIT')) {
+    return [
+      'Applied the edit: a delivery-areas FAQ entry joins the list.',
+      JSON.stringify({ tool: 'writeFile', args: { path: 'index.html', content: MOCK_INDEX_EDITED } }),
+    ].join('\n');
+  }
+  if (lastUser.includes('Fix this site error now') || sys.includes('ERROR FIX')) {
+    return [
+      'Fixed the reported error in app.js.',
+      JSON.stringify({ tool: 'writeFile', args: { path: 'app.js', content: MOCK_APP_FIXED } }),
+    ].join('\n');
+  }
   if (lastUser.includes('remaining planned files') || sys.includes('REMAINING FILES')) {
     return JSON.stringify({ tool: 'writeFile', args: { path: 'README.md', content: MOCK_README } });
   }
@@ -1780,17 +1988,7 @@ function mockBuilderResponse(messages: ChatMessage[]): string {
 }
 
 function mockResponseFor(messages: ChatMessage[]): string {
-  let role: string | null = null;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const m = messages[i];
-    if (m && m.role === 'system') {
-      const match = ROLE_MARKER.exec(m.content);
-      if (match) {
-        role = match[1] ?? null;
-        break;
-      }
-    }
-  }
+  const role = roleFromMessages(messages);
   switch (role) {
     case 'planner':
       return hasPlannerAnswers(messages) ? mockPlanResponse(messages) : mockAskResponse();

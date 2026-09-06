@@ -1,5 +1,15 @@
 import { Router, type Request, type Response } from 'express';
-import { PROVIDERS, readConfig, readKey, writeConfig, writeKey, type Provider } from '../config.js';
+import {
+  ConfigError,
+  PROVIDERS,
+  readConfig,
+  readKey,
+  validatePerRoleModels,
+  writeConfig,
+  writeKey,
+  type PerRoleModels,
+  type Provider,
+} from '../config.js';
 
 const MAX_MODEL_LEN = 128;
 const MAX_KEY_LEN = 4096;
@@ -38,6 +48,7 @@ export function createConfigRouter(dataRoot: string): Router {
         endpoint: config.endpoint,
         model: config.model,
         hasKey: key !== '',
+        perRoleModels: config.perRoleModels ?? {},
       });
     })().catch(next);
   });
@@ -49,7 +60,7 @@ export function createConfigRouter(dataRoot: string): Router {
         badRequest(res, 'body must be a JSON object');
         return;
       }
-      const { provider, endpoint, model, apiKey } = body as Record<string, unknown>;
+      const { provider, endpoint, model, apiKey, perRoleModels: rawPerRoleModels } = body as Record<string, unknown>;
 
       if (typeof provider !== 'string' || !(PROVIDERS as readonly string[]).includes(provider)) {
         badRequest(res, `provider must be one of: ${PROVIDERS.join(', ')}`);
@@ -67,12 +78,23 @@ export function createConfigRouter(dataRoot: string): Router {
         badRequest(res, `apiKey must be a string of at most ${MAX_KEY_LEN} characters`);
         return;
       }
+      let perRoleModels: PerRoleModels | undefined;
+      try {
+        perRoleModels = validatePerRoleModels(rawPerRoleModels);
+      } catch (err) {
+        if (err instanceof ConfigError) {
+          badRequest(res, err.message);
+          return;
+        }
+        throw err;
+      }
 
-      await writeConfig(dataRoot, { provider: provider as Provider, endpoint, model });
+      // PUT replaces the whole config: omitting perRoleModels clears overrides.
+      await writeConfig(dataRoot, { provider: provider as Provider, endpoint, model, perRoleModels });
       if (apiKey !== undefined) await writeKey(dataRoot, apiKey);
 
       const key = await readKey(dataRoot);
-      res.json({ provider, endpoint, model, hasKey: key !== '' });
+      res.json({ provider, endpoint, model, hasKey: key !== '', perRoleModels: perRoleModels ?? {} });
     })().catch(next);
   });
 

@@ -1,6 +1,6 @@
 {
   "name": "foundry",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Foundry — a self-hosted agentic website builder. Give it instructions; it asks, plans, builds and previews real websites using a team of AI agents.",
   "type": "module",
@@ -11,6 +11,7 @@
     "build:web": "npm --prefix web run build",
     "test": "npm --prefix server test",
     "smoke": "node scripts/smoke.mjs",
+    "perf": "node scripts/perf.mjs",
     "start": "node server/dist/index.js"
   },
   "engines": {
