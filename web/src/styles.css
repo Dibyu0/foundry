@@ -5424,3 +5424,612 @@ button.chip:hover {
   font-size: var(--fs-small);
   white-space: nowrap;
 }
+
+
+/* ------------------------------------------------------- live streaming */
+
+.bubble--live .bubble-text {
+  color: var(--text-0);
+}
+
+.live-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: var(--accent-strong);
+  animation: caret-blink 1s steps(1) infinite;
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-caret {
+    animation: none;
+  }
+}
+
+
+/* ==== wave2 foundations ==== */
+/* Global foundations + home entrance polish + preview skeleton. Loaded after
+   styles.css, so equal-specificity rules here win. Tokens only, no !important. */
+
+/* ---- scrollbars: token-colored thumb, 10px with a transparent grip border */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg-4) transparent;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--bg-4);
+  border: 2px solid transparent;
+  border-radius: var(--radius-pill);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--border-1); background-clip: padding-box; }
+
+/* ---- selection: accent tint, token-driven */
+::selection {
+  background: color-mix(in srgb, var(--accent) 34%, transparent);
+  color: var(--text-0);
+}
+
+/* ---- focus ring: consistent 2px offset everywhere */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-s);
+}
+
+/* ---- media inside buttons sits on the text baseline cleanly */
+button img, button svg, .btn img, .btn svg { vertical-align: middle; }
+
+/* ---- home hero: staggered rise+fade on mount (one shared keyframes) */
+@keyframes wave2-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.home-title, .home-sub, .home-composer, .home-templates, .home-recents {
+  animation: wave2-rise 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.home-sub { animation-delay: 60ms; }
+.home-composer { animation-delay: 120ms; }
+.home-templates { animation-delay: 180ms; }
+.home-recents { animation-delay: 240ms; }
+
+/* ---- recent cards: hover lift + brighter border + elevation */
+.recent-card {
+  transition: border-color 140ms ease-out, background 140ms ease-out,
+    transform 140ms ease-out, box-shadow 140ms ease-out;
+}
+.recent-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-2);
+}
+.recents-grid > li .recent-card {
+  animation: wave2-rise 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.recents-grid > li:nth-child(1) .recent-card { animation-delay: 0ms; }
+.recents-grid > li:nth-child(2) .recent-card { animation-delay: 40ms; }
+.recents-grid > li:nth-child(3) .recent-card { animation-delay: 80ms; }
+.recents-grid > li:nth-child(4) .recent-card { animation-delay: 120ms; }
+.recents-grid > li:nth-child(5) .recent-card { animation-delay: 160ms; }
+.recents-grid > li:nth-child(6) .recent-card { animation-delay: 200ms; }
+
+/* ---- provider pill: subtle hover lift, ok dot gets a slow pulse */
+.provider-pill {
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+.provider-pill:hover { transform: translateY(-1px); box-shadow: var(--shadow-1); }
+.provider-pill--ok .provider-pill-dot { animation: pulse 2.4s ease-in-out infinite; }
+
+/* ---- topbar elapsed timer chip */
+.elapsed {
+  padding: 2px 6px;
+  border: 1px solid var(--border-0);
+  border-radius: var(--radius-s);
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- preview skeleton: dim browser wireframe while the first files land */
+@keyframes wave2-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+.pv-skeleton {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  padding: var(--sp-5);
+}
+.pv-skel-browser {
+  width: min(560px, 86%);
+  border: 1px solid var(--border-0);
+  border-radius: var(--radius-l);
+  background: var(--bg-1);
+  overflow: hidden;
+}
+.pv-skel-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 var(--sp-3);
+  border-bottom: 1px solid var(--border-0);
+  background: var(--bg-2);
+}
+.pv-skel-bar i {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--bg-4);
+}
+.pv-skel-url {
+  flex: 1;
+  height: 10px;
+  margin-left: 6px;
+  border-radius: var(--radius-pill);
+}
+.pv-skel-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+}
+.pv-skel-hero { height: 96px; border-radius: var(--radius-m); }
+.pv-skel-lines { display: flex; flex-direction: column; gap: 8px; }
+.pv-skel-lines span { height: 10px; border-radius: var(--radius-pill); }
+.pv-skel-lines span:nth-child(1) { width: 70%; }
+.pv-skel-lines span:nth-child(2) { width: 55%; }
+.pv-skel-lines span:nth-child(3) { width: 62%; }
+.pv-skel-row { display: flex; gap: var(--sp-3); }
+.pv-skel-card { flex: 1; height: 72px; border-radius: var(--radius-m); }
+.pv-skel-url, .pv-skel-hero, .pv-skel-lines span, .pv-skel-card {
+  background: linear-gradient(100deg, var(--bg-2) 40%, var(--bg-3) 50%, var(--bg-2) 60%);
+  background-size: 200% 100%;
+  animation: wave2-shimmer 1.6s linear infinite;
+}
+.pv-skel-note { margin: 0; font-size: var(--fs-small); color: var(--text-2); }
+
+/* ---- reduced motion: everything instant, skeleton gradient stays static */
+@media (prefers-reduced-motion: reduce) {
+  .home-title, .home-sub, .home-composer, .home-templates, .home-recents,
+  .recents-grid > li .recent-card,
+  .provider-pill--ok .provider-pill-dot,
+  .provider-pill, .recent-card,
+  .pv-skel-url, .pv-skel-hero, .pv-skel-lines span, .pv-skel-card {
+    animation: none;
+    transition: none;
+  }
+}
+
+
+/* ==== wave2 chat polish ==== */
+/* REFINEMENTS fragment: loaded after styles.css, so equal-specificity rules
+   here win. Chat + composer clusters only. Tokens only, no !important. */
+
+/* Thread row entrance: rise + fade, transform/opacity only. */
+@keyframes w2-thread-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.thread-row {
+  animation: w2-thread-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* User bubble: the base rule had no hover state and no border transition. */
+.bubble--user {
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.bubble--user:hover {
+  border-color: var(--accent-strong);
+}
+
+/* Pinned card: warm 1px frame + a soft glow that breathes every 3s. */
+@keyframes w2-pin-glow {
+  0%,
+  100% { box-shadow: 0 0 0 0 var(--warm-dim); }
+  50% { box-shadow: 0 0 16px 0 var(--warm-dim); }
+}
+
+.chat-pin {
+  border: 1px solid var(--warm-dim);
+  animation: w2-pin-glow 3s var(--ease) infinite;
+}
+
+/* Activity rail: quieter type, optically centered avatar. */
+.activity-rail-text {
+  letter-spacing: 0.02em;
+  color: var(--text-2);
+}
+
+.activity-rail .role-avatar--rail {
+  align-self: center;
+}
+
+/* Suggestion + template chips: 120ms hover timing, press cancels the lift. */
+.suggestion,
+.tpl-chip {
+  transition-duration: var(--dur-fast);
+}
+
+.suggestion:active:not(:disabled),
+.tpl-chip:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+/* Composer card: accent border + soft outer glow on focus-within. */
+.composer-card {
+  transition:
+    border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease);
+}
+
+.composer-card:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-1), 0 0 0 3px var(--accent-dim);
+}
+
+/* Jump to latest: deeper shadow on hover to match the lift. */
+.jump-latest {
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.jump-latest:hover:not(:disabled) {
+  box-shadow: var(--shadow-3);
+}
+
+/* Queue strip: compact rows, hairline separators, breathing paused pill. */
+.queue-panel {
+  padding: var(--sp-1) var(--sp-2);
+}
+
+.queue-list {
+  gap: 0;
+}
+
+.queue-item + .queue-item {
+  border-top: 1px solid var(--border-0);
+}
+
+@keyframes w2-queue-paused {
+  0%,
+  100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.queue-paused {
+  animation: w2-queue-paused 2.4s var(--ease) infinite;
+}
+
+/* Mention popover: fade + scale entrance, eased option hover. */
+@keyframes w2-mention-in {
+  from { opacity: 0; transform: scale(0.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.mention-pop {
+  transform-origin: bottom center;
+  animation: w2-mention-in 140ms var(--ease);
+}
+
+.mention-option {
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+/* Live streaming: rounded caret; accent tint marks the in-progress bubble. */
+.bubble--live {
+  padding: 6px 10px;
+  border-radius: var(--radius-m);
+  background: var(--accent-dim);
+}
+
+.live-caret {
+  border-radius: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thread-row,
+  .chat-pin,
+  .queue-paused,
+  .mention-pop {
+    animation: none;
+  }
+}
+
+
+/* ==== wave2 workspace polish ==== */
+/* REFINEMENTS fragment: AgentTimeline.tsx + Workspace.tsx clusters only.
+   Appended after styles.css, so equal-specificity rules here win. Colors come
+   from the :root tokens; new keyframes are w2- prefixed. */
+
+/* Pipeline state transitions: the li flips pipe--queued -> --active -> --done
+   and the card's inline border/background flips with it; a declared
+   transition eases those computed-value changes (labels too). */
+.pipe-card {
+  transition: border-color 200ms var(--ease), background-color 200ms var(--ease), box-shadow 200ms var(--ease);
+}
+
+.role-name,
+.role-state { transition: color 200ms var(--ease); }
+
+/* Active card: soft light bleed inside the role-colored left edge (the edge
+   hue is inline, so the glow stays neutral and hugs it). */
+.pipe--active .pipe-card { box-shadow: inset 2px 0 8px -4px rgba(255, 255, 255, 0.22); }
+
+/* Active seal: slow halo pulse behind the spinning arc. Glow is the
+   --glow-accent token; the zero keyframe keeps --accent's hue so the
+   box-shadow interpolation stays clean. */
+.pipe--active .pipe-node svg {
+  border-radius: 50%;
+  animation: w2-seal-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes w2-seal-pulse {
+  0%,
+  100% { box-shadow: 0 0 0 0 rgba(94, 140, 255, 0); }
+  50% { box-shadow: var(--glow-accent); }
+}
+
+/* Role card stagger-in: on the card, not the li, so the li's inline opacity
+   (skipped state) stays authoritative. Mount-only; state flips don't
+   retrigger it. */
+.pipe > .pipe-item .pipe-card { animation: w2-role-in 240ms var(--ease) both; }
+
+@keyframes w2-role-in {
+  from { opacity: 0; transform: translateY(3px); }
+}
+
+.pipe > .pipe-item:nth-child(1) .pipe-card { animation-delay: 0ms; }
+.pipe > .pipe-item:nth-child(2) .pipe-card { animation-delay: 30ms; }
+.pipe > .pipe-item:nth-child(3) .pipe-card { animation-delay: 60ms; }
+.pipe > .pipe-item:nth-child(4) .pipe-card { animation-delay: 90ms; }
+.pipe > .pipe-item:nth-child(5) .pipe-card { animation-delay: 120ms; }
+.pipe > .pipe-item:nth-child(6) .pipe-card { animation-delay: 150ms; }
+
+/* Review findings: row entrance fade; hover hairline rides as an inset
+   shadow because the cell borders are inline. */
+.sev-table tbody tr { animation: w2-sev-in 200ms var(--ease) both; }
+
+@keyframes w2-sev-in {
+  from { opacity: 0; }
+}
+
+.sev-table tbody td { transition: box-shadow var(--dur-fast) var(--ease); }
+.sev-table tbody tr:hover td { box-shadow: inset 0 1px 0 0 var(--border-1); }
+
+.sev-dot { transition: box-shadow var(--dur-fast) var(--ease); }
+.sev-table tbody tr:hover .sev-dot--info { box-shadow: 0 0 6px var(--info); }
+.sev-table tbody tr:hover .sev-dot--warn { box-shadow: 0 0 6px var(--warn); }
+.sev-table tbody tr:hover .sev-dot--error { box-shadow: 0 0 6px var(--err); }
+
+/* Tabs: 160ms color/box-shadow cycle; active tab keeps the base elevation
+   and gains the 2px accent underline. */
+.tabs .tab {
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease), border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+
+.tabs .tab:hover { color: var(--text-0); }
+.tab[aria-selected='true'] { box-shadow: var(--shadow-1), inset 0 -2px 0 0 var(--accent); }
+
+/* Preview chrome: top inner highlight on the bar, accent underline for the
+   pressed width button, accent-tinted icon-btn hover. */
+.preview-chrome { box-shadow: inset 0 1px 0 0 var(--glass-line); }
+.seg--chrome .seg-btn[aria-pressed='true'] { box-shadow: inset 0 -2px 0 0 var(--accent); }
+
+.preview-chrome .icon-btn:hover:not(:disabled) {
+  color: var(--accent-text);
+  background: var(--accent-dim);
+}
+
+/* The frame remounts (key change) on every reload, so the fade replays. */
+.preview-frame { animation: w2-frame-in 200ms var(--ease); }
+
+@keyframes w2-frame-in {
+  from { opacity: 0; }
+}
+
+/* Done summary: backdrop fade + card scale/fade entrance, tabular stats. */
+.done-overlay { animation: w2-overlay-in var(--dur) var(--ease); }
+
+@keyframes w2-overlay-in {
+  from { opacity: 0; }
+}
+
+.done-card { animation: w2-done-card-in 220ms cubic-bezier(0.16, 1, 0.3, 1); }
+
+@keyframes w2-done-card-in {
+  from { opacity: 0; transform: scale(0.97); }
+}
+
+.done-stat-value { font-variant-numeric: tabular-nums; }
+
+/* Empty state: quieter rhythm, no hover on the icon well. */
+.empty-state { gap: var(--sp-3); }
+.empty-state p { margin: 0; }
+
+/* File cards: border color is inline, so the hover brighten is an inset
+   ring stacked over the 1px inline border. */
+.ff-card { transition: box-shadow var(--dur-fast) var(--ease); }
+.ff-card:hover { box-shadow: inset 0 0 0 1px var(--border-1); }
+
+/* Writing chip: accent shimmer sweep while its role is active. The band sits
+   mid-gradient so both loop extremes are transparent: seamless. */
+.pipe-writing {
+  background:
+    linear-gradient(100deg, transparent 42%, var(--accent-dim) 50%, transparent 58%) 100% 0 / 240% 100% no-repeat,
+    var(--bg-0);
+  animation: w2-chip-shimmer 2.4s var(--ease) infinite;
+}
+
+@keyframes w2-chip-shimmer {
+  from { background-position: 100% 0, 0 0; }
+  to { background-position: 0% 0, 0 0; }
+}
+
+/* Reduced motion: collapse every animation introduced above (transitions are
+   already collapsed by the global reduce rule in styles.css). */
+@media (prefers-reduced-motion: reduce) {
+  .pipe > .pipe-item .pipe-card,
+  .pipe--active .pipe-node svg,
+  .sev-table tbody tr,
+  .preview-frame,
+  .done-overlay,
+  .done-card,
+  .pipe-writing {
+    animation: none;
+  }
+}
+
+
+/* ==== wave2 panes polish ==== */
+/* REFINEMENTS fragment: loaded after styles.css; equal-specificity rules here
+   win. Code viewer, console, diff, history drawer, onboarding. Tokens only. */
+
+/* Code tabs: 140ms tint on the button; close control hidden until the tab is
+   hovered, focused, or active (VS Code-style reveal). */
+.code-tab-btn { transition: background-color 140ms var(--ease), color 140ms var(--ease); }
+
+.code-tab-close {
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+
+.code-tab:hover .code-tab-close,
+.code-tab:focus-within .code-tab-close,
+.code-tab.is-active .code-tab-close { opacity: 1; }
+
+/* File tree: 100ms hairline hover; the open file gets an accent left bar
+   (inset shadow, respects the radius); folder names read as headers. */
+.tree-file { transition: background-color 100ms var(--ease), color 100ms var(--ease),
+    box-shadow 100ms var(--ease); }
+
+.tree-file:hover {
+  background: var(--bg-2);
+  box-shadow: inset 0 0 0 1px var(--border-0);
+}
+
+.tree-file.is-selected,
+.tree-file.is-selected:hover {
+  background: var(--accent-dim);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.tree-folder-name { font-weight: 600; }
+
+/* Context menu: fade + scale(0.98 -> 1) entrance; hairline ring on item hover. */
+@keyframes w2-menu-in {
+  from { opacity: 0; transform: scale(0.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.code-menu {
+  transform-origin: top left;
+  animation: w2-menu-in var(--dur-fast) var(--ease);
+}
+
+.code-menu-item:hover:not(:disabled) { box-shadow: inset 0 0 0 1px var(--border-1); }
+
+/* Find-in-file: accent border + a tighter token ring inside the compact bar. */
+.code-search .input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
+/* Console: new rows fade in, capped at the first 20 so a buffer replay never
+   animates hundreds of nodes; the pressed filter reads accent. */
+.console-log > .console-row:nth-child(-n+20) { animation: cc-fade-in var(--dur-fast) var(--ease); }
+
+.console-filter[aria-pressed='true'] {
+  background: var(--accent-dim);
+  color: var(--accent-text);
+}
+
+/* Diff: hover brightens the row. The overlay sits on the cells — background or
+   box-shadow on a tr is unreliable under border-collapse: collapse. */
+.diff-row > td { transition: background-color var(--dur-fast) var(--ease); }
+
+.diff-row:hover > td { background-color: rgba(255, 255, 255, 0.03); }
+
+/* History drawer: fade + translateX(4px) stagger, 25ms steps over the first 12
+   rows. nth-child targets the VirtualList wrappers — each .drawer-item is an
+   only child of its positioned row wrapper. */
+@keyframes w2-drawer-item-in {
+  from { opacity: 0; transform: translateX(4px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.drawer-list [role='presentation']:nth-child(-n+12) .drawer-item {
+  animation: w2-drawer-item-in var(--dur) var(--ease) both;
+}
+
+.drawer-list [role='presentation']:nth-child(2) .drawer-item { animation-delay: 25ms; }
+.drawer-list [role='presentation']:nth-child(3) .drawer-item { animation-delay: 50ms; }
+.drawer-list [role='presentation']:nth-child(4) .drawer-item { animation-delay: 75ms; }
+.drawer-list [role='presentation']:nth-child(5) .drawer-item { animation-delay: 100ms; }
+.drawer-list [role='presentation']:nth-child(6) .drawer-item { animation-delay: 125ms; }
+.drawer-list [role='presentation']:nth-child(7) .drawer-item { animation-delay: 150ms; }
+.drawer-list [role='presentation']:nth-child(8) .drawer-item { animation-delay: 175ms; }
+.drawer-list [role='presentation']:nth-child(9) .drawer-item { animation-delay: 200ms; }
+.drawer-list [role='presentation']:nth-child(10) .drawer-item { animation-delay: 225ms; }
+.drawer-list [role='presentation']:nth-child(11) .drawer-item { animation-delay: 250ms; }
+.drawer-list [role='presentation']:nth-child(12) .drawer-item { animation-delay: 275ms; }
+
+/* Onboarding: the card rises in; the corner dismiss stays dim until the card
+   (or the button itself) is hovered or focused. */
+.onboard-card { animation: rise-in 220ms var(--ease) both; }
+
+.onboard-dismiss {
+  opacity: 0.55;
+  transition: opacity var(--dur-fast) var(--ease), color var(--dur) var(--ease),
+    background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.onboard-card:hover .onboard-dismiss,
+.onboard-dismiss:hover,
+.onboard-dismiss:focus-visible { opacity: 1; }
+
+/* Keycap chips: dark bottom edge + top highlight + drop shadow read as a
+   physical key. The composer's on-accent variant keeps its own look. */
+.kbd:not(.composer-send-kbd) {
+  border-color: var(--border-1);
+  border-bottom-color: rgba(0, 0, 0, 0.45);
+  background: var(--bg-3);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), var(--shadow-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .code-menu,
+  .onboard-card,
+  .console-log > .console-row:nth-child(-n+20),
+  .drawer-list [role='presentation']:nth-child(-n+12) .drawer-item {
+    animation: none;
+  }
+}

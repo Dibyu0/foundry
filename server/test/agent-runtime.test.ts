@@ -7,7 +7,7 @@ import {
   ProviderError,
 } from '../src/agent/provider.js';
 import type { ChatMessage, Provider } from '../src/agent/provider.js';
-import { compactTranscript, createRuntime } from '../src/agent/runtime.js';
+import { compactTranscript, createRuntime, createStreamFilter } from '../src/agent/runtime.js';
 import type { AgentEvent } from '../src/agent/runtime.js';
 import {
   executeFsTool,
@@ -166,6 +166,78 @@ describe('tool extraction', () => {
     const res = extractToolCalls('Use a { b } block and {"not":"a tool"} here.');
     expect(res.calls).toEqual([]);
     expect(res.notes).toEqual([]);
+  });
+});
+
+describe('createStreamFilter', () => {
+  function collect() {
+    const prose: string[] = [];
+    const writing: string[] = [];
+    const f = createStreamFilter(
+      (t) => prose.push(t),
+      (p) => writing.push(p),
+    );
+    return { f, prose, writing, text: () => prose.join('') };
+  }
+
+  it('passes plain prose through verbatim', () => {
+    const c = collect();
+    c.f.feed('Here is the plan, ');
+    c.f.feed('in words.');
+    c.f.finish();
+    expect(c.text()).toBe('Here is the plan, in words.');
+    expect(c.writing).toEqual([]);
+  });
+
+  it('suppresses a bare tool call but keeps the prose before it', () => {
+    const c = collect();
+    c.f.feed('On it. {"tool":"ask","args":{"question":"ok?"}}');
+    c.f.finish();
+    expect(c.text()).toBe('On it. ');
+  });
+
+  it('suppresses a tool call arriving as one overshooting chunk (the live leak)', () => {
+    const c = collect();
+    c.f.feed('{"tool":"ask","args":{"question":"Should the cards highlight roasts?"}}');
+    c.f.finish();
+    expect(c.text()).toBe('');
+  });
+
+  it('suppresses a fenced tool call including the fence marker', () => {
+    const c = collect();
+    for (const chunk of ['```', 'json', '\n', '{"tool":"ask"', ',"args":{}}', '\n```']) c.f.feed(chunk);
+    c.f.finish();
+    expect(c.text()).toBe('');
+  });
+
+  it('suppresses a tool call split across chunk boundaries', () => {
+    const c = collect();
+    for (const chunk of ['{"to', 'ol":"pla', 'n","args":{}}']) c.f.feed(chunk);
+    c.f.finish();
+    expect(c.text()).toBe('');
+  });
+
+  it('releases held text that turns out to be prose braces', () => {
+    const c = collect();
+    c.f.feed('Use a {color} token and { spacing } here.');
+    c.f.finish();
+    expect(c.text()).toBe('Use a {color} token and { spacing } here.');
+  });
+
+  it('releases a lone backtick that is not a fence', () => {
+    const c = collect();
+    c.f.feed('Use `code` inline.');
+    c.f.finish();
+    expect(c.text()).toBe('Use `code` inline.');
+  });
+
+  it('reports writeFile paths from inside the suppressed region, once', () => {
+    const c = collect();
+    c.f.feed('{"tool":"writeFile","args":{"path":"styles.css","content":"body{}"}}');
+    c.f.feed('{"tool":"writeFile","args":{"path":"styles.css","content":"more"}}');
+    c.f.finish();
+    expect(c.text()).toBe('');
+    expect(c.writing).toEqual(['styles.css']);
   });
 });
 

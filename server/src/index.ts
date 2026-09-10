@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { ensureCerts } from './certs.js';
-import { ensureDataDirs, writeConfig, DEFAULT_CONFIG } from './config.js';
+import { ensureDataDirs, writeConfig, readConfig, DEFAULT_CONFIG } from './config.js';
 import { appShellHeaders, rateLimit, requestId } from './security.js';
 import { SseHub } from './sse.js';
 import { agentRouter } from './routes/agent.js';
@@ -52,6 +52,40 @@ function listen(server: http.Server | https.Server, port: number, host: string):
     server.once('error', reject);
     server.listen(port, host, () => resolve());
   });
+}
+
+/**
+ * Preloads the configured Ollama model (plus any per-role overrides) so the
+ * first build never pays a multi-second cold load. An empty-messages call
+ * makes Ollama load the weights and exit immediately; keep_alive pins them.
+ * Best-effort: failures are silent — the first real call will just load then.
+ */
+async function warmOllama(dataRoot: string, log: (message: string) => void): Promise<void> {
+  try {
+    const config = await readConfig(dataRoot);
+    if (config.provider !== 'ollama') return;
+    const endpoint = (config.endpoint !== '' ? config.endpoint : 'http://localhost:11434').replace(/\/+$/, '');
+    const models = new Set<string>([config.model !== '' ? config.model : 'qwen2.5-coder:7b']);
+    for (const m of Object.values(config.perRoleModels ?? {})) {
+      if (typeof m === 'string' && m.trim() !== '') models.add(m.trim());
+    }
+    for (const model of models) {
+      try {
+        const res = await fetch(`${endpoint}/api/chat`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ model, messages: [], keep_alive: '24h' }),
+          signal: AbortSignal.timeout(120_000),
+        });
+        await res.arrayBuffer();
+        log(`[foundry] ollama model warmed and pinned (keep_alive 24h): ${model}`);
+      } catch {
+        log(`[foundry] ollama warmup skipped for ${model} (server unreachable?)`);
+      }
+    }
+  } catch {
+    // A broken/missing config already surfaces through /api/config; warmup stays silent.
+  }
 }
 
 /**
@@ -200,6 +234,8 @@ export async function createServer(opts: ServerOptions = {}): Promise<FoundrySer
     log('Dev certificate is self-signed: the browser will warn once. Proceed past the warning, or import');
     log(`${path.join(dirs.certs, 'cert.pem')} into your OS trust store to silence it permanently.`);
     log(`Redirecting http://localhost:${httpPort} -> https://localhost:${httpsPort}`);
+
+    void warmOllama(dataRoot, log);
   }
 
   return {

@@ -71,6 +71,7 @@ export function App() {
   const [current, setCurrent] = useState<BuildState | null>(null);
   const [buildLoading, setBuildLoading] = useState(false);
   const [activity, setActivity] = useState<Record<string, ActivityEvent>>({});
+  const [liveText, setLiveText] = useState<Record<string, string>>({});
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('idle');
   const [approved, setApproved] = useState(false);
 
@@ -178,6 +179,15 @@ export function App() {
             seenMessagesRef.current.add(key);
             return { ...c, messages: [...c.messages, ev.message] };
           });
+          if (ev.message.role === 'agent' && ev.message.agent !== undefined) {
+            const role = ev.message.agent.toLowerCase();
+            setLiveText((m) => {
+              if (!(role in m)) return m;
+              const next = { ...m };
+              delete next[role];
+              return next;
+            });
+          }
           break;
         case 'question':
           setCurrent((c) => (c ? { ...c, pendingQuestion: ev.question } : c));
@@ -200,7 +210,21 @@ export function App() {
           break;
         case 'activity':
           setActivity((a) => ({ ...a, [ev.activity.role.toLowerCase()]: ev.activity }));
+          if (ev.activity.state !== 'active') {
+            setLiveText((m) => {
+              const role = ev.activity.role.toLowerCase();
+              if (!(role in m)) return m;
+              const next = { ...m };
+              delete next[role];
+              return next;
+            });
+          }
           break;
+        case 'delta': {
+          const role = ev.role.toLowerCase();
+          setLiveText((m) => ({ ...m, [role]: (m[role] ?? '') + ev.text }));
+          break;
+        }
         case 'review':
           setCurrent((c) => {
             if (!c) return c;
@@ -273,6 +297,7 @@ export function App() {
       try {
         const { id } = await createBuild(brief);
         setActivity({});
+        setLiveText({});
         setApproved(false);
         try {
           const state = await getBuild(id);
@@ -382,6 +407,7 @@ export function App() {
         if (loadTokenRef.current !== token) return;
         seedMessages(state.messages);
         setActivity({});
+        setLiveText({});
         // Only phases past planning count as approved — an INTAKE build
         // still needs its Approve button when the plan arrives.
         setApproved(['BUILDING', 'REVIEW', 'DONE'].includes(state.phase));
@@ -399,6 +425,7 @@ export function App() {
     loadTokenRef.current += 1;
     setCurrent(null);
     setActivity({});
+    setLiveText({});
     setApproved(false);
     setBuildLoading(false);
     setChatCollapsed(false);
@@ -472,6 +499,7 @@ export function App() {
           hasBuild={current !== null || buildLoading}
           running={running}
           messages={current?.messages ?? []}
+          liveText={liveText}
           sending={sending}
           onSend={sendBrief}
           mentionFiles={mentionFiles}

@@ -652,6 +652,16 @@ function numCtxFrom(raw: Record<string, unknown> | null): number {
   return typeof v === 'number' && Number.isFinite(v) && v >= 512 ? Math.floor(v) : OLLAMA_DEFAULT_NUM_CTX;
 }
 
+// Every request re-pins the model in memory so a pipeline never pays a cold
+// reload between roles. Override with the ollamaKeepAlive config key
+// (duration string like "30m", or -1 to keep loaded indefinitely).
+const OLLAMA_DEFAULT_KEEP_ALIVE = '24h';
+
+function keepAliveFrom(raw: Record<string, unknown> | null): string {
+  const v = raw?.['ollamaKeepAlive'];
+  return typeof v === 'string' && v.trim() !== '' ? v.trim() : OLLAMA_DEFAULT_KEEP_ALIVE;
+}
+
 export function createOllamaProvider(config: HttpProviderConfig = {}): Provider {
   const endpoint = config.endpoint ?? OLLAMA_DEFAULT_ENDPOINT;
   const model = config.model ?? OLLAMA_DEFAULT_MODEL;
@@ -663,7 +673,10 @@ export function createOllamaProvider(config: HttpProviderConfig = {}): Provider 
     random: config.random ?? Math.random,
     now: config.now ?? Date.now,
     timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    streamIdleTimeoutMs: config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    // Local models can pause for tens of seconds mid-stream on CPU (prefill,
+    // KV pressure); give the body generous idle headroom. The total timeout
+    // still bounds time-to-headers, which is all a stalled server can hang.
+    streamIdleTimeoutMs: config.streamIdleTimeoutMs ?? 120_000,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
     key: null,
   };
@@ -677,10 +690,14 @@ export function createOllamaProvider(config: HttpProviderConfig = {}): Provider 
     const options: Record<string, number> = { num_ctx: numCtxFrom(raw) };
     if (opts?.temperature !== undefined) options.temperature = opts.temperature;
     if (opts?.maxTokens !== undefined) options.num_predict = opts.maxTokens;
+    const resolvedModel = modelForCall(raw, messages, model);
     return {
-      model: modelForCall(raw, messages, model),
+      model: resolvedModel,
       messages: toWireMessages(messages),
       stream: streaming,
+      keep_alive: keepAliveFrom(raw),
+      // qwen3 models think by default; thinking tokens tank role latency.
+      ...(resolvedModel.startsWith('qwen3') ? { think: false } : {}),
       ...(Object.keys(options).length > 0 ? { options } : {}),
     };
   }

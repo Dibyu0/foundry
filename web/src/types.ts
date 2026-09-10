@@ -167,6 +167,7 @@ export type BuildEvent =
   | { type: 'plan'; plan: Plan }
   | { type: 'file'; file: SiteFile }
   | { type: 'activity'; activity: ActivityEvent }
+  | { type: 'delta'; role: string; text: string }
   | { type: 'review'; issues: ReviewIssue[] }
   | { type: 'done'; siteUrl?: string }
   | { type: 'restored'; checkpoint?: number }

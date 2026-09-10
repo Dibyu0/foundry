@@ -87,6 +87,27 @@ function fullTimestamp(ts: number | undefined): string | undefined {
   return new Date(ts > 1e12 ? ts : ts * 1000).toLocaleString();
 }
 
+const RUNNING_PHASES = new Set(['INTAKE', 'PLANNED', 'BUILDING', 'REVIEW']);
+
+function Elapsed({ since, active }: { since: number; active: boolean }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, [active]);
+  const secs = Math.max(0, Math.floor((now - (since > 1e12 ? since : since * 1000)) / 1000));
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  const text = h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+  return (
+    <span className="elapsed" title="Time since the build started">
+      {text}
+    </span>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Provider status pill (top bar)                                     */
 /* ------------------------------------------------------------------ */
@@ -185,6 +206,7 @@ function TopBar({ p, historyOpen, historyToggleRef, onToggleHistory }: TopBarPro
                 {build.brief || 'Untitled build'}
               </span>
               <PhaseBadge phase={build.phase} />
+              <Elapsed since={build.createdAt} active={RUNNING_PHASES.has(build.phase)} />
             </>
           ) : (
             <span className="topbar-title muted">Loading build...</span>

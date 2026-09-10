@@ -209,6 +209,11 @@ export function normalizeEvent(raw: unknown): BuildEvent | null {
       const activity = normActivity(e.activity ?? e);
       return activity ? { type: 'activity', activity } : null;
     }
+    case 'delta': {
+      const role = str(e.role);
+      const text = str(e.text);
+      return role && text ? { type: 'delta', role, text } : null;
+    }
     case 'review': {
       const list = Array.isArray(e.issues) ? e.issues : e.issue !== undefined ? [e.issue] : [e];
       const issues = list.map(normIssue).filter((i): i is ReviewIssue => i !== null);
@@ -433,7 +438,7 @@ export interface StreamHandle {
   retry(): void;
 }
 
-const EVENT_TYPES = ['phase', 'message', 'question', 'plan', 'file', 'activity', 'review', 'done', 'restored', 'error'] as const;
+const EVENT_TYPES = ['phase', 'message', 'question', 'plan', 'file', 'activity', 'delta', 'review', 'done', 'restored', 'error'] as const;
 
 export function openBuildEvents(
   id: string,

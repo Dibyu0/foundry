@@ -424,6 +424,31 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
               </div>
             )}
           </div>
+        ) : running ? (
+          <div className="pv-skeleton" aria-label="The team is writing the first files">
+            <div className="pv-skel-browser" aria-hidden="true">
+              <div className="pv-skel-bar">
+                <i /><i /><i />
+                <span className="pv-skel-url" />
+              </div>
+              <div className="pv-skel-page">
+                <div className="pv-skel-hero" />
+                <div className="pv-skel-lines">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+                <div className="pv-skel-row">
+                  <div className="pv-skel-card" />
+                  <div className="pv-skel-card" />
+                  <div className="pv-skel-card" />
+                </div>
+              </div>
+            </div>
+            <p className="pv-skel-note">
+              The team is writing the first files — the live preview lands here. Progress streams in the chat.
+            </p>
+          </div>
         ) : (
           <div className="empty-state empty-hint">
             <svg className="empty-icon" width="36" height="36" viewBox="0 0 36 36" aria-hidden="true">
@@ -439,12 +464,7 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
                 opacity="0.55"
               />
             </svg>
-            <p>
-              {running
-                ? 'The preview appears as soon as the team writes the first files.'
-                : 'This build produced no files to preview.'}
-            </p>
-            {running && <p className="empty-sub">Progress streams in the chat while the team works.</p>}
+            <p>This build produced no files to preview.</p>
           </div>
         )}
       </div>

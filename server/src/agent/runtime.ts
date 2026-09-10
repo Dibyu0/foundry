@@ -15,6 +15,8 @@ import type { Plan, Question, ReviewIssue, SiteStore } from './tools.js';
 
 export type AgentEvent =
   | { type: 'text'; text: string }
+  | { type: 'delta'; text: string }
+  | { type: 'writing'; path: string }
   | { type: 'tool'; name: string; args: Record<string, unknown>; result: string }
   | { type: 'question'; question: Question }
   | { type: 'plan'; plan: Plan }
@@ -132,6 +134,109 @@ function raceAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
   ]);
 }
 
+const TOOL_SKELETON = '{"tool"';
+/** Chars the maybe-tool hold buffer may reach before it is flushed as prose. */
+const MAYBE_CAP = 64;
+
+/**
+ * Incremental filter over streamed provider chunks: prose flows through as
+ * live deltas, tool-call JSON (bare or ```json fenced) is suppressed — it
+ * surfaces later as interpreted events, never as raw text. A `{` starts a
+ * hold; while the held text could still become `{"tool"` it stays held, a
+ * mismatch flushes it as prose, and a match (including chunks that overshoot
+ * the prefix, e.g. `{"tool":"ask"` in one delta) suppresses the rest of the
+ * response. A fence opener (``` plus optional language tag) is consumed
+ * silently. writeFile paths inside the suppressed region are reported live
+ * via onWriting so the UI can narrate "Writing styles.css" as it happens.
+ */
+export function createStreamFilter(
+  onProse: (text: string) => void,
+  onWriting: (path: string) => void,
+): { feed: (chunk: string) => void; finish: () => void } {
+  let mode: 'prose' | 'maybe' | 'tool' | 'fence' = 'prose';
+  let held = '';
+  let toolBuf = '';
+  const announced = new Set<string>();
+
+  function watchWriting(): void {
+    const m = /"path"\s*:\s*"([^"]{1,200})"/.exec(toolBuf);
+    if (m !== null && !announced.has(m[1]!)) {
+      announced.add(m[1]!);
+      onWriting(m[1]!);
+    }
+  }
+
+  function feed(chunk: string): void {
+    let s = chunk;
+    while (s.length > 0) {
+      if (mode === 'prose') {
+        const brace = s.indexOf('{');
+        const tick = s.indexOf('`');
+        const cut = brace === -1 ? tick : tick === -1 ? brace : Math.min(brace, tick);
+        if (cut === -1) {
+          onProse(s);
+          return;
+        }
+        if (cut > 0) onProse(s.slice(0, cut));
+        held = s[cut]!;
+        mode = s[cut] === '{' ? 'maybe' : 'fence';
+        s = s.slice(cut + 1);
+        continue;
+      }
+      if (mode === 'fence') {
+        held += s;
+        s = '';
+        if (/^`{3,}[a-zA-Z0-9_-]*\r?\n/.test(held)) {
+          // A real fence opener: swallow it, then scan on as prose.
+          held = '';
+          mode = 'prose';
+        } else if (/^`{3,}[a-zA-Z0-9_-]*$/.test(held) || /^`{1,2}$/.test(held)) {
+          // Still a candidate opener (or a lone backtick); keep holding.
+        } else {
+          onProse(held);
+          held = '';
+          mode = 'prose';
+        }
+        continue;
+      }
+      if (mode === 'maybe') {
+        held += s;
+        s = '';
+        const skeleton = held.replace(/\s+/g, '');
+        if (skeleton.startsWith(TOOL_SKELETON)) {
+          mode = 'tool';
+          toolBuf = held;
+          watchWriting();
+        } else if (TOOL_SKELETON.startsWith(skeleton)) {
+          if (held.length > MAYBE_CAP) {
+            // Pathological whitespace flood; give up and show it.
+            onProse(held);
+            held = '';
+            mode = 'prose';
+          }
+          // else: still a candidate, keep holding.
+        } else {
+          onProse(held);
+          held = '';
+          mode = 'prose';
+        }
+        continue;
+      }
+      // tool mode: suppress; watch for writeFile paths.
+      toolBuf += s;
+      s = '';
+      watchWriting();
+    }
+  }
+
+  function finish(): void {
+    if ((mode === 'maybe' || mode === 'fence') && held !== '') onProse(held);
+    held = '';
+  }
+
+  return { feed, finish };
+}
+
 /**
  * The agent loop. Each iteration asks the provider for a response, appends it
  * to the transcript, extracts tool calls, executes filesystem tools against
@@ -157,12 +262,21 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
     };
     compact();
     const callProvider = async (): Promise<string> => {
+      const filter = createStreamFilter(
+        (text) => emit({ type: 'delta', text }),
+        (path) => emit({ type: 'writing', path }),
+      );
       try {
-        return await raceAbort(deps.provider.complete(messages, { signal: opts.signal }), opts.signal);
+        return await raceAbort(
+          deps.provider.stream(messages, (delta) => filter.feed(delta), { signal: opts.signal }),
+          opts.signal,
+        );
       } catch (e) {
         const err = e instanceof Error ? e : new Error(String(e));
         emit({ type: 'error', message: err.message });
         throw err;
+      } finally {
+        filter.finish();
       }
     };
 

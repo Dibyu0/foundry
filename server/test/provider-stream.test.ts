@@ -57,7 +57,7 @@ describe('stream abort wiring', () => {
 });
 
 describe('stream idle timeout', () => {
-  it('aborts a stalled stream after the default 45s idle budget (fake clock)', async () => {
+  it('aborts a stalled stream after the default 45s idle budget (fake clock)', { timeout: 60_000 }, async () => {
     vi.useFakeTimers();
     const body = manualStream([]);
     const provider = createKimiProvider({

@@ -11,6 +11,8 @@ interface ChatColumnProps {
   hasBuild: boolean;
   running: boolean;
   messages: ChatMessage[];
+  /** Live streamed prose per role (lowercase role id -> partial text); rendered as typing bubbles. */
+  liveText?: Record<string, string>;
   sending: boolean;
   onSend: (brief: string) => Promise<boolean>;
   /** Cancel the running build, then send immediately. Enables 'Send now' on queued items and the draft. */
@@ -35,6 +37,7 @@ interface ChatColumnProps {
 }
 
 const NO_FILES: string[] = [];
+const NO_LIVE: Record<string, string> = {};
 
 /** Distance from the bottom (px) within which the thread stays glued to latest. */
 const STICK_THRESHOLD_PX = 56;
@@ -235,19 +238,19 @@ function deriveRail(
   const note = activityNote?.trim() ?? '';
   if (activeRole) {
     return {
-      text: note !== '' ? `${roleLabel(activeRole)} is ${note}` : `${roleLabel(activeRole)} is working`,
+      text: note !== '' ? `${roleLabel(activeRole)} — ${note}…` : `${roleLabel(activeRole)} is thinking…`,
       role: activeRole,
     };
   }
-  if (note !== '') return { text: note, role: null };
+  if (note !== '') return { text: `${note}…`, role: null };
   if (running) {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const m = messages[i];
-      if (m.role === 'agent') return { text: `${roleLabel(m.agent)} is working`, role: m.agent ?? null };
+      if (m.role === 'agent') return { text: `${roleLabel(m.agent)} is working…`, role: m.agent ?? null };
     }
-    return { text: 'Foundry is working', role: null };
+    return { text: 'The team is working…', role: null };
   }
-  if (sending) return { text: 'Sending your brief', role: null };
+  if (sending) return { text: 'Sending your brief…', role: null };
   return null;
 }
 
@@ -259,6 +262,7 @@ export function ChatColumn({
   hasBuild,
   running,
   messages,
+  liveText = NO_LIVE,
   sending,
   onSend,
   onSendNow,
@@ -331,6 +335,12 @@ export function ChatColumn({
       setUnread((u) => u + (messages.length - prev));
     }
   }, [messages.length, feedKey, unread]);
+
+  // Keep the tail pinned while a live stream grows (only when already stuck).
+  useEffect(() => {
+    const el = listRef.current;
+    if (el && stuckRef.current) scrollToBottom(el, false);
+  }, [liveText]);
 
   function onListScroll() {
     const el = listRef.current;
@@ -448,6 +458,25 @@ export function ChatColumn({
           {messages.map((m, i) => (
             <ThreadMessage key={i} m={m} />
           ))}
+
+          {Object.entries(liveText)
+            .filter(([, text]) => text !== '')
+            .map(([role, text]) => (
+              <div className="thread-row thread-row--agent" key={`live-${role}`}>
+                <span className="role-avatar" data-role={role} aria-hidden="true">
+                  <RoleIcon role={role} />
+                </span>
+                <div className="bubble bubble--agent bubble--live">
+                  <div className="bubble-meta">
+                    <span className="bubble-author">{roleLabel(role)}</span>
+                  </div>
+                  <div className="bubble-text">
+                    {text}
+                    <span className="live-caret" aria-hidden="true" />
+                  </div>
+                </div>
+              </div>
+            ))}
 
           {flow}
         </div>

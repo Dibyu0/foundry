@@ -115,7 +115,13 @@ function editAwareProvider(captured: { editPrompts: string[]; fixPrompts: string
   };
   return {
     complete,
-    stream: (messages, onDelta) => mock.stream(messages, onDelta),
+    stream: async (messages, onDelta) => {
+      const text = await complete(messages);
+      const mid = Math.ceil(text.length / 2);
+      onDelta(text.slice(0, mid));
+      onDelta(text.slice(mid));
+      return text;
+    },
   };
 }
 
@@ -272,7 +278,15 @@ describe('follow-up edits (EDITING)', () => {
         if (lastUser.includes('Apply this edit now:')) throw new Error('provider exploded');
         return mock.complete(messages);
       },
-      stream: (messages, onDelta) => mock.stream(messages, onDelta),
+      stream: async (messages, onDelta) => {
+        const text = await (async () => {
+          const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content ?? '';
+          if (lastUser.includes('Apply this edit now:')) throw new Error('provider exploded');
+          return mock.complete(messages);
+        })();
+        onDelta(text);
+        return text;
+      },
     };
     const w = await world({ provider });
     const id = await buildToDone(w);

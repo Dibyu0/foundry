@@ -7,6 +7,7 @@ import { scanSiteEnv, type EnvReport } from './envNotes.js';
 import type { CheckpointService } from './checkpoints.js';
 import type { ChatMessage, Provider } from './provider.js';
 import { createRuntime } from './runtime.js';
+import type { AgentEvent } from './runtime.js';
 import {
   extractToolCalls,
   validateReviewNotesArgs,
@@ -1350,19 +1351,57 @@ export class Orchestrator {
     let turn = 0;
     let nudges = 0;
     let blockedAsks = 0;
-    for (;;) {
-      turn += 1;
-      if (turn > opts.maxTurns) {
-        if (opts.bestEffort) return;
-        throw new Error(`${role} did not finish its job within ${opts.maxTurns} replies`);
+    // Streamed prose is coalesced into ~120ms / 400-char SSE frames so a
+    // chatty provider cannot flood the channel one token at a time.
+    let deltaBuf = '';
+    let deltaTimer: ReturnType<typeof setTimeout> | null = null;
+    const flushDelta = (): void => {
+      if (deltaBuf === '') return;
+      const text = deltaBuf;
+      deltaBuf = '';
+      this.emit(b, { type: 'delta', role, text });
+    };
+    const onRuntimeEvent = (ev: AgentEvent): void => {
+      if (ev.type === 'delta') {
+        deltaBuf += ev.text;
+        if (deltaBuf.length >= 400) {
+          if (deltaTimer !== null) {
+            clearTimeout(deltaTimer);
+            deltaTimer = null;
+          }
+          flushDelta();
+        } else if (deltaTimer === null) {
+          deltaTimer = setTimeout(() => {
+            deltaTimer = null;
+            flushDelta();
+          }, 120);
+          // A pending flush must never pin the process or a test's event loop.
+          if (typeof deltaTimer === 'object' && 'unref' in deltaTimer) deltaTimer.unref();
+        }
+      } else if (ev.type === 'writing') {
+        this.activity(b, role, 'active', `Writing ${ev.path}`);
       }
-      this.throwIfStopped(b);
-      this.throwIfPaused(b);
-      const signal = b.abort?.signal;
-      const result = await runtime.run(messages, {
-        ...(signal !== undefined ? { signal } : {}),
-        maxIterations: 1,
-      });
+    };
+    try {
+      for (;;) {
+        turn += 1;
+        if (turn > opts.maxTurns) {
+          if (opts.bestEffort) return;
+          throw new Error(`${role} did not finish its job within ${opts.maxTurns} replies`);
+        }
+        this.throwIfStopped(b);
+        this.throwIfPaused(b);
+        const signal = b.abort?.signal;
+        const result = await runtime.run(messages, {
+          ...(signal !== undefined ? { signal } : {}),
+          maxIterations: 1,
+          onEvent: onRuntimeEvent,
+        });
+        if (deltaTimer !== null) {
+          clearTimeout(deltaTimer);
+          deltaTimer = null;
+        }
+        flushDelta();
       this.throwIfStopped(b);
       await this.syncFiles(b);
 
@@ -1485,6 +1524,13 @@ export class Orchestrator {
           throw new Error(`${role} is not emitting tool calls`);
         }
       }
+      }
+    } finally {
+      if (deltaTimer !== null) {
+        clearTimeout(deltaTimer);
+        deltaTimer = null;
+      }
+      flushDelta();
     }
   }
 

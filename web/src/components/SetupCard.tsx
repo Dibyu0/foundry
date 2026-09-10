@@ -9,12 +9,34 @@ interface ProviderPreset {
   endpoint: string;
   model: string;
   needsKey: boolean;
+  modelHints?: string[];
 }
 
 const PROVIDERS: ProviderPreset[] = [
-  { id: 'kimi', label: 'Kimi (Moonshot)', endpoint: 'https://api.moonshot.cn/v1', model: 'kimi-k2-0711-preview', needsKey: true },
-  { id: 'openai-compatible', label: 'OpenAI-compatible', endpoint: 'https://api.openai.com/v1', model: 'gpt-4o', needsKey: true },
-  { id: 'ollama', label: 'Ollama (local)', endpoint: 'http://localhost:11434', model: 'llama3.1', needsKey: false },
+  {
+    id: 'kimi',
+    label: 'Kimi (Moonshot)',
+    endpoint: 'https://api.moonshot.ai/v1',
+    model: 'kimi-k2.7-code-highspeed',
+    needsKey: true,
+    modelHints: ['kimi-k2.7-code-highspeed', 'kimi-k2.7-code', 'kimi-k3', 'kimi-k2.6'],
+  },
+  {
+    id: 'openai-compatible',
+    label: 'OpenAI-compatible',
+    endpoint: 'https://api.openai.com/v1',
+    model: 'gpt-4o',
+    needsKey: true,
+    modelHints: ['gpt-4o', 'gpt-4o-mini'],
+  },
+  {
+    id: 'ollama',
+    label: 'Ollama (local)',
+    endpoint: 'http://localhost:11434',
+    model: 'qwen2.5-coder:7b',
+    needsKey: false,
+    modelHints: ['qwen2.5-coder:7b', 'qwen2.5-coder:1.5b', 'qwen3:4b'],
+  },
   { id: 'mock', label: 'Mock (offline demo)', endpoint: '', model: 'mock-model', needsKey: false },
 ];
 
@@ -146,7 +168,15 @@ export function SetupCard({ config, loading, error, onSaved, onRetry, onDismiss 
               value={model}
               onChange={(e) => setModel(e.target.value)}
               disabled={preset.id === 'mock'}
+              list="setup-model-hints"
             />
+            {preset.modelHints !== undefined && (
+              <datalist id="setup-model-hints">
+                {preset.modelHints.map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
+            )}
           </label>
 
           <label className="field">
