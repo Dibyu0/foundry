@@ -594,3 +594,37 @@ describe('autopilot', () => {
     }
   });
 });
+
+describe('role contract resilience', () => {
+  it('nudges a role that finishes without its required file instead of failing on the spot', { timeout: 30_000 }, async () => {
+    const mock = createMockProvider();
+    let designCalls = 0;
+    const designAware = async (messages: ChatMessage[]): Promise<string> => {
+      const sys = messages[0]?.content ?? '';
+      if (sys.includes('[role:design]')) {
+        designCalls += 1;
+        if (designCalls === 1) {
+          return JSON.stringify({ tool: 'finish', args: { summary: 'calling it done early' } });
+        }
+      }
+      return mock.complete(messages);
+    };
+    const provider: Provider = {
+      complete: designAware,
+      stream: async (messages, onDelta) => {
+        const text = await designAware(messages);
+        onDelta(text);
+        return text;
+      },
+    };
+    const w = await world({ provider });
+    const { id } = w.orchestrator.createBuild('A landing page for a small bakery', { autopilot: true });
+
+    await waitFor(() => w.orchestrator.get(id)?.phase === 'DONE', 'done', 20_000);
+
+    expect(designCalls).toBe(2); // first finish bounced off the nudge, second wrote the files
+    const state = w.orchestrator.get(id);
+    expect(state?.phase).toBe('DONE');
+    expect(state?.files.some((f) => f.path === 'styles.css')).toBe(true);
+  });
+});

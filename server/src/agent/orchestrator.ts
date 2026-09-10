@@ -1566,7 +1566,15 @@ export class Orchestrator {
           continue;
         }
         if (requiredMissing.length > 0 && opts.bestEffort !== true) {
-          throw new Error(`${role} finished without writing ${requiredMissing.join(', ')}`);
+          // Models (especially chatty ones) sometimes finish before writing —
+          // send them back to write instead of killing the build on the spot.
+          nudges += 1;
+          messages.push({
+            role: 'tool',
+            content: `error: you called finish without writing ${requiredMissing.join(', ')} — write ${requiredMissing.length === 1 ? 'it' : 'them'} with writeFile first, then call finish`,
+          });
+          if (nudges > MAX_NUDGES) throw new Error(`${role} finished without writing ${requiredMissing.join(', ')}`);
+          continue;
         }
         return;
       }
