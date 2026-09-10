@@ -455,7 +455,12 @@ export function extractToolCalls(response: string): ExtractResult {
       break;
     }
     if (end === -1) {
-      if (looksLikeTool(response.slice(i))) notes.push(noteFor(response.slice(i), 'unbalanced braces'));
+      if (looksLikeTool(response.slice(i))) {
+        notes.push(noteFor(response.slice(i), 'unbalanced braces'));
+        // A truncated tool call must never reach the user as raw JSON; drop
+        // the tail from the visible prose (scanning continues unaffected).
+        removed.push({ start: i, end: response.length });
+      }
       continue;
     }
     const raw = response.slice(i, end);
@@ -466,6 +471,7 @@ export function extractToolCalls(response: string): ExtractResult {
       i = end - 1;
     } else if (malformed) {
       notes.push(noteFor(raw, 'invalid JSON'));
+      removed.push({ start: i, end });
       i = end - 1;
     } else if (!raw.includes('"tool"')) {
       // Balanced JSON with no "tool" substring can hold no call or malformed
@@ -479,8 +485,16 @@ export function extractToolCalls(response: string): ExtractResult {
 
   let text = '';
   let pos = 0;
+  // Removed spans can overlap (a truncated tail may swallow nested spans);
+  // merge before slicing so the prose rebuild stays linear.
   const sorted = [...removed].sort((a, b) => a.start - b.start);
-  for (const span of sorted) {
+  const merged: Span[] = [];
+  for (const s of sorted) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && s.start <= last.end) last.end = Math.max(last.end, s.end);
+    else merged.push({ start: s.start, end: s.end });
+  }
+  for (const span of merged) {
     text += response.slice(pos, span.start);
     pos = span.end;
   }

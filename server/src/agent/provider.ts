@@ -642,6 +642,15 @@ export function createKimiProvider(config: HttpProviderConfig = {}): Provider {
 
 const OLLAMA_DEFAULT_ENDPOINT = 'http://localhost:11434';
 const OLLAMA_DEFAULT_MODEL = 'qwen2.5-coder:7b';
+// Ollama defaults num_ctx to 2048; role prompts alone can exceed that, which
+// truncates tool JSON mid-object. 8192 gives every role room; override with
+// the ollamaNumCtx raw config key.
+const OLLAMA_DEFAULT_NUM_CTX = 8192;
+
+function numCtxFrom(raw: Record<string, unknown> | null): number {
+  const v = raw?.['ollamaNumCtx'];
+  return typeof v === 'number' && Number.isFinite(v) && v >= 512 ? Math.floor(v) : OLLAMA_DEFAULT_NUM_CTX;
+}
 
 export function createOllamaProvider(config: HttpProviderConfig = {}): Provider {
   const endpoint = config.endpoint ?? OLLAMA_DEFAULT_ENDPOINT;
@@ -665,7 +674,7 @@ export function createOllamaProvider(config: HttpProviderConfig = {}): Provider 
     opts: CallOptions | undefined,
     raw: Record<string, unknown> | null,
   ) {
-    const options: Record<string, number> = {};
+    const options: Record<string, number> = { num_ctx: numCtxFrom(raw) };
     if (opts?.temperature !== undefined) options.temperature = opts.temperature;
     if (opts?.maxTokens !== undefined) options.num_predict = opts.maxTokens;
     return {

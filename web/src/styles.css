@@ -479,18 +479,20 @@ select.input {
 }
 
 /* --------------------------------------------------------- activity rail */
-/* Slim icon rail for switching work-view panes. */
+/* Slim live-status bar ChatColumn pins above the composer while an agent
+   works (the legacy vertical pane-switcher no longer exists). */
 
 .activity-rail {
-  flex: 0 0 48px;
-  width: 48px;
+  flex: 0 0 auto;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: var(--sp-1);
-  padding: var(--sp-2) 0;
-  border-right: 1px solid var(--border-0);
+  gap: var(--sp-2);
+  min-height: 34px;
+  padding: 0 var(--sp-3);
+  border-top: 1px solid var(--border-0);
   background: var(--bg-1);
+  color: var(--text-2);
+  font-size: var(--fs-small);
 }
 
 .rail-btn {
@@ -857,7 +859,19 @@ select.input {
 }
 
 .composer-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
   font-size: var(--fs-small);
+}
+
+@media (max-width: 520px) {
+  .composer-hint {
+    display: none;
+  }
 }
 
 .composer-actions {
@@ -3181,4 +3195,2232 @@ button.chip:hover {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ==========================================================================
+   Home view (Layout.tsx HomeView) — the centered hero. This block covers the
+   class names Layout/TemplatesGallery actually render; the earlier .tpl-*
+   set belongs to the pre-redesign gallery markup.
+   ========================================================================== */
+
+.home {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  isolation: isolate;
+}
+
+/* Aurora backdrop: two soft tinted fields, static under reduced-motion. */
+.home::before,
+.home::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: 0.5;
+  pointer-events: none;
+}
+.home::before {
+  width: 640px;
+  height: 640px;
+  top: -260px;
+  right: -140px;
+  background: radial-gradient(closest-side, rgba(76, 201, 240, 0.22), transparent 70%);
+}
+.home::after {
+  width: 720px;
+  height: 720px;
+  bottom: -320px;
+  left: -180px;
+  background: radial-gradient(closest-side, rgba(178, 107, 255, 0.18), transparent 70%);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .home::before { animation: home-drift-a 26s ease-in-out infinite alternate; }
+  .home::after { animation: home-drift-b 32s ease-in-out infinite alternate; }
+}
+@keyframes home-drift-a {
+  from { transform: translate(0, 0); }
+  to { transform: translate(-60px, 40px); }
+}
+@keyframes home-drift-b {
+  from { transform: translate(0, 0); }
+  to { transform: translate(70px, -50px); }
+}
+
+.home-inner {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: clamp(28px, 6vh, 72px) 24px 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.home-title {
+  margin: 0;
+  font-size: clamp(30px, 4.6vw, 46px);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.08;
+  color: var(--text-0);
+}
+
+.home-sub {
+  margin: 14px 0 0;
+  max-width: 620px;
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+/* The setup card must never dominate the hero: compact, centered, quiet. */
+.home .setup-card {
+  width: min(560px, 100%);
+  margin: 22px auto 0;
+  text-align: left;
+}
+
+.home-composer {
+  width: min(760px, 100%);
+  margin-top: 26px;
+  text-align: left;
+}
+
+.home-templates {
+  margin-top: 18px;
+  display: flex;
+  justify-content: center;
+}
+
+/* Template chips: horizontal pill row, never a bulleted list. */
+.tpl-chips { display: block; }
+.tpl-chips-list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tpl-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border: 1px solid var(--border-1, rgba(255, 255, 255, 0.1));
+  border-radius: 999px;
+  background: var(--bg-1);
+  color: var(--text-1);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 140ms ease-out, background 140ms ease-out, transform 140ms ease-out;
+}
+.tpl-chip:hover:not(:disabled) {
+  border-color: var(--accent, #5e8cff);
+  background: var(--bg-2);
+  transform: translateY(-1px);
+}
+.tpl-chip:focus-visible {
+  outline: 2px solid var(--ring, #4c8dff);
+  outline-offset: 2px;
+}
+.tpl-chip:disabled { opacity: 0.55; cursor: default; }
+.tpl-chip-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--accent, #5e8cff);
+}
+.tpl-chip-label { white-space: nowrap; }
+
+/* Recent builds: a real grid of quiet cards. */
+.home-recents {
+  width: min(860px, 100%);
+  margin-top: 44px;
+  text-align: left;
+}
+.recents-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.recents-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.recents-msg { margin: 8px 0; }
+.recents-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.recent-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 14px;
+  text-align: left;
+  background: var(--bg-1);
+  border: 1px solid var(--border-1, rgba(255, 255, 255, 0.08));
+  border-radius: var(--radius-m, 10px);
+  color: var(--text-1);
+  cursor: pointer;
+  transition: border-color 140ms ease-out, transform 140ms ease-out, background 140ms ease-out;
+}
+.recent-card:hover {
+  border-color: var(--accent, #5e8cff);
+  background: var(--bg-2);
+  transform: translateY(-1px);
+}
+.recent-card:focus-visible {
+  outline: 2px solid var(--ring, #4c8dff);
+  outline-offset: 2px;
+}
+.recent-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.recent-brief {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-1);
+}
+
+@media (max-width: 640px) {
+  .home-inner { padding-top: 32px; }
+}
+
+
+/* ============================================================ app shell */
+/* The Layout component (Layout.tsx) renders .shell > .topbar + .view.
+   These rules give the shell its frame: full-height column, a glass
+   topbar with three zones, and a flex view region the home/work views
+   fill. Mirrors the legacy .app-header/.app-body proportions. */
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--bg-1);
+}
+
+.view {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* -------------------------------------------------------------- topbar */
+
+.topbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  height: 46px;
+  padding: 0 var(--sp-3);
+  border-bottom: 1px solid var(--border-0);
+  background: rgba(10, 13, 19, 0.78);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  position: relative;
+  z-index: 50;
+}
+
+.topbar-side {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 5px 7px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.topbar-brand:hover {
+  background: var(--bg-3);
+}
+
+.topbar-brand-name {
+  font-size: var(--fs-title);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text-0);
+}
+
+.topbar-context {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+}
+
+.topbar-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+  font-size: var(--fs-body);
+}
+
+.topbar-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* --------------------------------------------------------- provider pill */
+
+.provider-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border-0);
+  border-radius: var(--radius-pill);
+  background: var(--bg-2);
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--fs-small);
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.provider-pill:hover {
+  background: var(--bg-3);
+  border-color: var(--border-1);
+}
+
+.provider-pill-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-2);
+}
+
+.provider-pill-label {
+  font-weight: 600;
+  color: var(--text-0);
+  text-transform: capitalize;
+}
+
+.provider-pill-model {
+  padding-left: 7px;
+  margin-left: 1px;
+  border-left: 1px solid var(--border-0);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.01em;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-pill--ok .provider-pill-dot {
+  background: var(--ok);
+  box-shadow: 0 0 8px rgba(63, 206, 139, 0.55);
+}
+
+.provider-pill--warn {
+  border-color: rgba(245, 197, 66, 0.4);
+  color: var(--warn);
+}
+
+.provider-pill--warn .provider-pill-dot {
+  background: var(--warn);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.provider-pill--warn .provider-pill-label {
+  color: var(--warn);
+}
+
+.provider-pill--error {
+  border-color: rgba(240, 97, 109, 0.45);
+  color: var(--err);
+}
+
+.provider-pill--error .provider-pill-dot {
+  background: var(--err);
+}
+
+.provider-pill--error .provider-pill-label {
+  color: var(--err);
+}
+
+.provider-pill--loading .provider-pill-dot {
+  animation: pulse 1.1s ease-in-out infinite;
+}
+
+/* ------------------------------------------------------------ work view */
+
+.work {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.work-chat {
+  flex: 0 0 400px;
+  width: 400px;
+  max-width: 46vw;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border-0);
+  background: var(--bg-1);
+}
+
+.work-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-0);
+}
+
+@media (max-width: 900px) {
+  .work-chat {
+    flex-basis: 320px;
+    width: 320px;
+  }
+}
+
+@media (max-width: 720px) {
+  .work {
+    flex-direction: column;
+  }
+
+  .work-chat {
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: none;
+    max-height: 46%;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-0);
+  }
+}
+
+/* -------------------------------------------------------- history drawer */
+
+.drawer-root {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+}
+
+.drawer-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(3, 5, 8, 0.55);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  animation: drawer-fade var(--dur) var(--ease);
+}
+
+.drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(400px, 92vw);
+  display: flex;
+  flex-direction: column;
+  background: rgba(13, 17, 24, 0.94);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-left: 1px solid var(--border-1);
+  box-shadow: var(--shadow-3);
+  animation: drawer-in var(--dur-slow) var(--ease);
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(28px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes drawer-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.drawer-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  height: 46px;
+  padding: 0 var(--sp-3);
+  border-bottom: 1px solid var(--border-0);
+}
+
+.drawer-title {
+  font-size: var(--fs-title);
+  font-weight: 650;
+  color: var(--text-0);
+}
+
+.drawer-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.drawer-msg {
+  padding: var(--sp-4);
+  font-size: var(--fs-body);
+}
+
+.drawer-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-2);
+}
+
+.drawer-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-m);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.drawer-item:hover,
+.drawer-item.is-active {
+  background: var(--bg-3);
+}
+
+.drawer-item.is-current {
+  background: var(--accent-dim);
+  border-color: rgba(94, 140, 255, 0.35);
+}
+
+.drawer-item-top {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.drawer-brief {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-0);
+  font-size: var(--fs-body);
+}
+
+.drawer-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-size: var(--fs-small);
+  color: var(--text-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer,
+  .drawer-scrim {
+    animation: none;
+  }
+}
+
+
+/* ########################################################## */
+/* ==== chat styles (fragment) ==== */
+/* ChatColumn.tsx: scrollable thread (user bubbles right / agent avatar
+   column left), pinned question card, jump-to-latest pill, activity rail
+   bits, and the empty-state welcome mark. Relies on the existing
+   .chat-inner / .messages / .welcome / .suggestions rules in styles.css. */
+
+/* --------------------------------------------------------- scroll region */
+
+.chat-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ------------------------------------------------------------ thread rows */
+
+.thread-row {
+  min-width: 0;
+}
+
+.thread-row--user {
+  align-self: flex-end;
+  max-width: 85%;
+}
+
+.thread-row--agent {
+  align-self: stretch;
+  display: flex;
+  gap: var(--sp-2);
+}
+
+/* --------------------------------------------------------------- bubbles */
+
+.bubble {
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: var(--radius-l);
+  font-size: var(--fs-body);
+  line-height: 1.5;
+  box-shadow: var(--shadow-1);
+}
+
+.bubble--user {
+  background: linear-gradient(180deg, rgba(94, 140, 255, 0.22), rgba(94, 140, 255, 0.13));
+  border: 1px solid rgba(94, 140, 255, 0.38);
+  border-bottom-right-radius: var(--radius-s);
+  color: var(--text-0);
+}
+
+/* Agent messages are cardless: the avatar carries the chrome. */
+.bubble--agent {
+  flex: 1 1 auto;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: var(--text-0);
+}
+
+.bubble-meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin-bottom: 3px;
+}
+
+.bubble-meta--end {
+  justify-content: flex-end;
+  margin: 3px 0 0;
+}
+
+.bubble-author {
+  font-size: var(--fs-small);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-1);
+}
+
+.bubble-time {
+  flex: 0 0 auto;
+  font-size: var(--fs-micro);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.bubble-text {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* ---------------------------------------------------------- role avatars */
+
+.role-avatar {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-top: 1px;
+  border-radius: 50%;
+  border: 1px solid rgba(94, 140, 255, 0.32);
+  background: var(--accent-dim);
+  color: var(--accent-text);
+}
+
+.role-avatar[data-role='planner'] {
+  border-color: rgba(94, 168, 255, 0.32);
+  background: rgba(94, 168, 255, 0.13);
+  color: var(--role-planner);
+}
+
+.role-avatar[data-role='design'] {
+  border-color: rgba(185, 140, 255, 0.32);
+  background: rgba(185, 140, 255, 0.13);
+  color: var(--role-design);
+}
+
+.role-avatar[data-role='copy'] {
+  border-color: rgba(245, 197, 66, 0.32);
+  background: rgba(245, 197, 66, 0.13);
+  color: var(--role-copy);
+}
+
+.role-avatar[data-role='builder'] {
+  border-color: rgba(255, 122, 69, 0.32);
+  background: rgba(255, 122, 69, 0.13);
+  color: var(--role-builder);
+}
+
+.role-avatar[data-role='reviewer'] {
+  border-color: rgba(63, 206, 139, 0.32);
+  background: rgba(63, 206, 139, 0.13);
+  color: var(--role-reviewer);
+}
+
+.role-avatar--rail {
+  width: 20px;
+  height: 20px;
+  margin-top: 0;
+}
+
+/* -------------------------------------------------------- thread divider */
+
+.thread-divider {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin: var(--sp-1) 0;
+  color: var(--text-2);
+  font-size: var(--fs-small);
+  letter-spacing: 0.04em;
+}
+
+.thread-divider-line {
+  flex: 1 1 0;
+  height: 1px;
+  background: var(--border-0);
+}
+
+.thread-divider-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ pinned card */
+
+.chat-pin {
+  flex: 0 0 auto;
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  border-bottom: 1px solid var(--border-0);
+  background: linear-gradient(180deg, rgba(242, 166, 90, 0.08), rgba(242, 166, 90, 0.02));
+}
+
+.chat-pin-kicker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: var(--sp-2);
+  color: var(--warm);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.chat-pin-body {
+  min-width: 0;
+}
+
+/* ------------------------------------------------------- jump-to-latest */
+
+.jump-latest {
+  position: absolute;
+  left: 50%;
+  bottom: var(--sp-3);
+  translate: -50% 0;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-pill);
+  background: var(--glass-bg);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--fs-small);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: var(--shadow-2);
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+  animation: jump-latest-in var(--dur) var(--ease);
+}
+
+.jump-latest:hover:not(:disabled) {
+  background: var(--bg-3);
+  color: var(--text-0);
+  transform: translateY(-1px);
+}
+
+.jump-latest:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.jump-latest-label {
+  white-space: nowrap;
+}
+
+.jump-latest-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  line-height: 1;
+}
+
+@keyframes jump-latest-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* --------------------------------------------------------- welcome state */
+
+.welcome-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: var(--sp-4);
+  border: 1px solid rgba(94, 140, 255, 0.3);
+  border-radius: var(--radius-l);
+  background: var(--accent-dim);
+  color: var(--accent);
+  box-shadow: 0 0 24px rgba(94, 140, 255, 0.16);
+}
+
+.welcome-sub {
+  margin: 0 0 var(--sp-4);
+  max-width: 34ch;
+  color: var(--text-2);
+  font-size: var(--fs-body);
+  line-height: 1.5;
+}
+
+/* --------------------------------------------------------- activity rail */
+
+.activity-rail-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+  font-size: var(--fs-small);
+}
+
+.activity-rail-dots {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.activity-rail-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-2);
+  animation: chat-dot-bounce 1.2s var(--ease) infinite;
+}
+
+.activity-rail-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.activity-rail-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes chat-dot-bounce {
+  0%,
+  60%,
+  100% {
+    opacity: 0.5;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jump-latest,
+  .activity-rail-dot {
+    animation: none;
+  }
+}
+
+
+/* ########################################################## */
+/* ==== composer styles (fragment) ==== */
+/* ChatComposer.tsx + QuestionCard.tsx. Complements the existing composer
+   block (.composer / .composer-input / .composer-bar / .composer-hint /
+   .composer-actions / .composer-wand / .composer-chips / .mention-* /
+   .queue-panel / .queue-item / .q-option / .q-freeform) in styles.css —
+   nothing below redefines those selectors. */
+
+/* ------------------------------------------------------------ card shell */
+
+.composer-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: var(--sp-2);
+  border: 1px solid var(--border-0);
+  border-radius: var(--radius-l);
+  background: var(--bg-2);
+  box-shadow: var(--shadow-1);
+  transition: border-color var(--dur) var(--ease);
+}
+
+.composer-card:focus-within {
+  border-color: var(--border-1);
+}
+
+.composer-field {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.composer-note {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-small);
+}
+
+/* -------------------------------------------------------------- tool row */
+
+.composer-tools {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.composer-tool {
+  width: 26px;
+  height: 26px;
+}
+
+.composer-tool--mention[aria-expanded='true'] {
+  color: var(--accent-text);
+  background: var(--accent-dim);
+  border-color: rgba(94, 140, 255, 0.35);
+}
+
+/* Wrapper carries the tooltip for the always-disabled mic button (disabled
+   buttons swallow pointer events, so the title lives on the span). */
+.composer-tool-wrap {
+  flex: 0 0 auto;
+  display: inline-flex;
+}
+
+.composer-tool--mic:disabled {
+  opacity: 0.35;
+}
+
+/* Wand while an enhance request is in flight (spinner icon inside). */
+.composer-wand.is-working {
+  color: var(--warm);
+  cursor: progress;
+}
+
+/* ------------------------------------------------------------- send area */
+
+.composer-send {
+  flex: 0 0 auto;
+}
+
+.composer-send-icon {
+  flex: 0 0 auto;
+}
+
+.composer-send-label {
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* Key hint rendered inside the primary (accent) button: a dark keycap that
+   reads on the accent fill instead of the default bg-2 chip. */
+.composer-send-kbd {
+  padding: 0 5px;
+  border-color: rgba(5, 7, 10, 0.3);
+  background: rgba(5, 7, 10, 0.18);
+  color: var(--on-accent);
+  font-weight: 600;
+  box-shadow: none;
+}
+
+/* Busy icon for the wand (and any icon-sized spinner). Reuses the global
+   @keyframes spin from styles.css. */
+.icon-spinner {
+  display: inline-block;
+  animation: spin 0.9s linear infinite;
+}
+
+/* --------------------------------------------------------- mention chips */
+
+/* .chip already supplies mono type, max-width and ellipsis; the label span
+   must be allowed to shrink inside the inline-flex chip for that to bite. */
+.mention-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------- queue header */
+
+.queue-title {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-1);
+}
+
+.queue-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+}
+
+.queue-paused {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid rgba(245, 197, 66, 0.4);
+  border-radius: var(--radius-pill);
+  background: rgba(245, 197, 66, 0.1);
+  color: var(--warn);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.queue-index {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+}
+
+/* ----------------------------------------------------- question card */
+
+.q-option-radio {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  margin-right: var(--sp-2);
+  border: 1px solid var(--border-1);
+  border-radius: 50%;
+  background: var(--bg-0);
+  transition:
+    border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease);
+}
+
+.q-option-radio::after {
+  content: '';
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: transparent;
+  transition: background var(--dur) var(--ease);
+}
+
+.q-option-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.q-option:hover:not(:disabled) .q-option-radio {
+  border-color: var(--info);
+}
+
+/* Checked pill: mirrors the mention-option --active/[aria-selected] pair. */
+.q-option--selected,
+.q-option[aria-checked='true'] {
+  border-color: var(--info);
+  background: rgba(98, 200, 245, 0.14);
+  color: var(--text-0);
+}
+
+.q-option--selected .q-option-radio,
+.q-option[aria-checked='true'] .q-option-radio {
+  border-color: var(--info);
+}
+
+.q-option--selected .q-option-radio::after,
+.q-option[aria-checked='true'] .q-option-radio::after {
+  background: var(--info);
+}
+
+/* Free-text "other answer" row (paired with the existing .q-freeform). */
+.q-other {
+  align-items: center;
+}
+
+.q-other-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.q-other-send {
+  flex: 0 0 auto;
+}
+
+/* --------------------------------------------------------- adaptivity */
+
+@media (max-width: 720px) {
+  .composer-send-kbd {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .icon-spinner {
+    animation: none;
+  }
+}
+
+
+/* ########################################################## */
+/* ==== timeline styles (fragment) ==== */
+/* AgentTimeline.tsx - agent team panel: vertical pipeline spine, live
+   activity line, expanded file detail, reviewer findings table. Layout
+   primitives are inline in the component; these rules add the state and
+   interaction layer inline styles cannot express. State rides on the
+   pipe--<state> modifier on each li (queued/active/done/skipped/error);
+   per-role colors and seal/dot tints are already applied inline. */
+
+/* ---------------------------------------------------------- pipeline list */
+
+.pipe {
+  min-width: 0; /* grid child of .timeline-body: let rows shrink to ellipsis */
+}
+
+/* Active role: soft halo around the spinning arc. The arc stroke carries
+   the per-role color inline, so a neutral palette glow hugs the role hue. */
+.pipe--active .pipe-node svg {
+  filter: drop-shadow(0 0 4px rgba(154, 168, 196, 0.45));
+}
+
+/* Spine background flips to ok-green when a role finishes - ease the flip. */
+.pipe-spine {
+  transition: background var(--dur) var(--ease);
+}
+
+.pipe-card-row {
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------- live activity */
+
+.pipe-activity {
+  min-width: 0; /* lets .pipe-activity-line ellipsis inside the 1fr column */
+}
+
+.pipe-activity-line {
+  line-height: 1.4;
+}
+
+/* "writing <file>" chip is a real button - full click cycle. */
+.pipe-writing {
+  cursor: pointer;
+  color: var(--text-1);
+  transition:
+    color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.pipe-writing:hover:not(:disabled) {
+  color: var(--accent-text);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.pipe-writing:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ------------------------------------------------------------- head summary */
+
+.team-counts {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+}
+
+/* -------------------------------------------------------------- file detail */
+
+.ff-detail {
+  min-width: 0;
+  animation: ff-detail-in var(--dur) var(--ease);
+}
+
+@keyframes ff-detail-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* -------------------------------------------------------- reviewer findings */
+
+.sev {
+  min-width: 0; /* spans both .timeline-body lanes; lets the table wrapper scroll-x */
+}
+
+.sev-head {
+  white-space: nowrap;
+}
+
+.sev-table {
+  color: var(--text-1);
+}
+
+.sev-table tbody tr {
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.sev-table tbody tr:hover {
+  background: rgba(154, 168, 196, 0.06);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ff-detail {
+    animation: none;
+  }
+}
+
+
+/* ########################################################## */
+/* ==== workspace styles (fragment) ==== */
+/* Workspace.tsx cluster: preview-chrome dots + tools, the compact chrome
+   segmented control, tab/button icon decor, the done-card dismiss button,
+   and the empty/loading placeholder states. Builds on the .tab / .btn /
+   .icon-btn / .seg / .done-card / .empty-state bases and the `spin`
+   keyframes already defined in styles.css. */
+
+/* ------------------------------------------------------- tab + btn icons */
+
+.tab-icon {
+  flex: 0 0 auto;
+  display: block;
+  opacity: 0.72;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.tab:hover .tab-icon,
+.tab[aria-selected='true'] .tab-icon {
+  opacity: 1;
+}
+
+.btn-icon {
+  flex: 0 0 auto;
+  display: block;
+}
+
+/* -------------------------------------------------------- preview chrome */
+
+/* macOS-style window dots: muted traffic-light tints, quiet on the bar. */
+.chrome-dots {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 var(--sp-1);
+  margin-right: 2px;
+}
+
+.chrome-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.chrome-dot:nth-child(1) {
+  background: rgba(240, 97, 109, 0.55);
+}
+
+.chrome-dot:nth-child(2) {
+  background: rgba(245, 197, 66, 0.5);
+}
+
+.chrome-dot:nth-child(3) {
+  background: rgba(63, 206, 139, 0.5);
+}
+
+.chrome-tools {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+/* Compact .seg variant sized to sit with the 24px chrome-bar controls. */
+.seg--chrome {
+  flex: 0 0 auto;
+  border-radius: var(--radius-s);
+  background: var(--bg-1);
+}
+
+.seg--chrome .seg-btn {
+  width: 26px;
+  height: 20px;
+}
+
+/* ------------------------------------------------------------ done card */
+
+/* Float keeps the dismiss control in the card's top-right corner in flow,
+   so .done-card needs no positioning context of its own. Negative margins
+   pull it 8px into the card's 24px padding. */
+.done-close {
+  float: right;
+  margin: calc(-1 * var(--sp-2)) calc(-1 * var(--sp-2)) var(--sp-1) var(--sp-2);
+}
+
+/* --------------------------------------------------------- empty states */
+
+.empty-spinner {
+  display: inline-block;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border-1);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.empty-hint {
+  gap: var(--sp-3);
+}
+
+/* Icon-in-a-well placeholder anchor. content-box keeps the 36px svg at
+   full size inside the padded, bordered tile. */
+.empty-icon {
+  box-sizing: content-box;
+  padding: var(--sp-2);
+  border: 1px solid var(--border-0);
+  border-radius: var(--radius-l);
+  background: var(--bg-2);
+  color: var(--text-2);
+  box-shadow: var(--shadow-1);
+}
+
+.empty-hint p:not(.empty-sub) {
+  max-width: 400px;
+  margin: 0;
+  color: var(--text-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .empty-spinner {
+    animation: none;
+  }
+}
+
+
+/* ########################################################## */
+/* ==== code-console styles (fragment) ==== */
+/* CodeViewer.tsx / ConsoleTab.tsx / DiffView.tsx. Several of these
+ * components set base geometry via inline style props; rules here either
+ * fall back to the same values or add what inline styles cannot express
+ * (hover/pressed/disabled states, animations, tabular numerals). Where a
+ * state must beat an inline base value it is marked !important on purpose. */
+
+/* ---------------------------------------------------- code viewer chrome */
+
+.code-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+  padding: 4px 6px 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  border-bottom: 1px solid var(--border-0);
+  background: var(--bg-1);
+}
+
+.code-tab {
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.code-tab:not(.is-active):hover {
+  background: var(--bg-3) !important;
+  color: var(--text-1) !important;
+}
+
+.code-tab-btn {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.tree-file-icon,
+.code-tab-icon,
+.code-head-icon {
+  flex: 0 0 auto;
+  display: block;
+}
+
+.code-tab-close {
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+
+.code-tab-close:hover {
+  color: var(--text-0) !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+
+.code-tab-dirty {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  visibility: hidden;
+}
+
+/* The component pins visibility via inline style; the data attribute is the
+ * sanctioned reveal hook, so it must win over the inline base. */
+.code-tab-dirty[data-dirty='true'] {
+  visibility: visible !important;
+}
+
+.code-search {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-0);
+  background: var(--bg-1);
+}
+
+.code-menu {
+  min-width: 150px;
+  padding: var(--sp-1);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-m);
+  background: var(--bg-2);
+  box-shadow: var(--shadow-2);
+  animation: cc-pop-in var(--dur-fast) var(--ease);
+}
+
+.code-menu-item {
+  display: block;
+  width: 100%;
+  border: none;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-0);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  padding: 5px var(--sp-3);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.code-menu-item:hover:not(:disabled) {
+  background: var(--bg-3) !important;
+}
+
+.code-menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed !important;
+}
+
+.tree-folder-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-file-open {
+  color: var(--accent);
+  animation: cc-fade-in var(--dur-fast) var(--ease);
+}
+
+/* ------------------------------------------------------------ console feed */
+
+.console {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-0);
+}
+
+.console-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-0);
+  background: var(--bg-1);
+}
+
+.console-filters {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border-0);
+  border-radius: var(--radius-m);
+  background: var(--bg-0);
+}
+
+.console-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: none;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-small);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.console-filter:hover:not(:disabled):not([aria-pressed='true']) {
+  color: var(--text-0);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.console-filter[aria-pressed='true'] {
+  background: var(--bg-3);
+  color: var(--text-0);
+  box-shadow: var(--shadow-1);
+}
+
+.console-filter:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.console-filter-count {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  line-height: 14px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.console-filter[aria-pressed='true'] .console-filter-count {
+  background: rgba(94, 140, 255, 0.2);
+  color: var(--accent-text);
+}
+
+.console-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.console-action {
+  padding: 3px 9px;
+  border: 1px solid var(--border-0);
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-small);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.console-action:hover:not(:disabled) {
+  color: var(--text-0);
+  background: var(--bg-3);
+  border-color: var(--border-1);
+}
+
+.console-action[aria-pressed='true'] {
+  color: var(--warn);
+  border-color: rgba(245, 197, 66, 0.35);
+  background: rgba(245, 197, 66, 0.08);
+}
+
+.console-action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.console-paused-note {
+  color: var(--warn);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  white-space: nowrap;
+}
+
+.console-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-1) 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.console-empty {
+  flex: 1;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6) var(--sp-4);
+  color: var(--text-2);
+  text-align: center;
+  font-family: var(--font-sans);
+}
+
+.console-empty p {
+  margin: 0;
+  max-width: 360px;
+}
+
+.empty-sub {
+  margin: 0;
+  font-size: var(--fs-small);
+  color: var(--text-2);
+  opacity: 0.75;
+}
+
+.console-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: 3px var(--sp-3) 3px calc(var(--sp-3) - 2px);
+  border-left: 2px solid transparent;
+}
+
+.console-row:hover {
+  box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.02);
+}
+
+.console-row-icon {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--text-2);
+}
+
+.console-row--log .console-row-icon {
+  color: var(--text-2);
+}
+
+.console-row--warn {
+  border-left-color: var(--warn);
+  background: rgba(245, 197, 66, 0.04);
+}
+
+.console-row--warn .console-row-icon {
+  color: var(--warn);
+}
+
+.console-row--error {
+  border-left-color: var(--err);
+  background: rgba(240, 97, 109, 0.05);
+}
+
+.console-row--error .console-row-icon {
+  color: var(--err);
+}
+
+.console-row--error .console-row-text {
+  color: var(--text-0);
+}
+
+.console-row-time {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--text-2);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.console-row-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.console-row-text {
+  color: var(--text-1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.console-row-meta {
+  margin-right: 6px;
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.console-row-loc {
+  color: var(--text-2);
+  font-size: var(--fs-small);
+}
+
+.console-details-btn {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent-text);
+  font: inherit;
+  font-family: var(--font-sans);
+  font-size: var(--fs-small);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.console-details-btn:hover:not(:disabled) {
+  color: var(--accent-strong);
+  text-decoration: underline;
+}
+
+.console-details-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.console-details {
+  margin: 2px 0 4px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-0);
+  border-radius: var(--radius-s);
+  background: var(--bg-1);
+  color: var(--text-1);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  white-space: pre;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.console-fix {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 1px;
+  padding: 3px var(--sp-2);
+  border: 1px solid rgba(94, 140, 255, 0.35);
+  border-radius: var(--radius-s);
+  background: var(--accent-dim);
+  color: var(--accent-text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-small);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.console-fix:hover:not(:disabled) {
+  background: rgba(94, 140, 255, 0.24);
+  border-color: var(--accent);
+  color: var(--text-0);
+}
+
+.console-fix:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.console-fix-icon {
+  flex: 0 0 auto;
+  display: block;
+}
+
+.console-toast {
+  position: absolute;
+  left: 50%;
+  bottom: var(--sp-4);
+  z-index: 5;
+  transform: translateX(-50%);
+  margin: 0;
+  max-width: calc(100% - var(--sp-5) * 2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 6px var(--sp-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-pill);
+  background: var(--glass-bg);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: var(--shadow-2);
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  font-size: var(--fs-small);
+  animation: console-toast-in var(--dur) var(--ease);
+}
+
+.console-toast--ok {
+  border-color: rgba(63, 206, 139, 0.4);
+  color: var(--ok);
+}
+
+.console-toast--err {
+  border-color: rgba(240, 97, 109, 0.45);
+  color: var(--err);
+}
+
+/* -------------------------------------------------------------- diff view */
+
+.diff-view {
+  border: 1px solid var(--border-0);
+  border-radius: var(--radius-m);
+  background: var(--bg-1);
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.diff-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: 6px var(--sp-3);
+  border-bottom: 1px solid var(--border-0);
+  background: var(--bg-2);
+  font-family: var(--font-sans);
+}
+
+.diff-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+}
+
+.diff-stats {
+  display: inline-flex;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-scroll {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.diff-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.diff-row {
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.diff-row--context {
+  background: transparent;
+}
+
+/* Same channel values the component uses inline; these are the no-JS /
+ * fallback tints so rows stay readable if inline styles are stripped. */
+.diff-row--added {
+  background: rgba(63, 206, 139, 0.1);
+}
+
+.diff-row--removed {
+  background: rgba(240, 97, 109, 0.1);
+}
+
+.diff-row--truncated {
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-family: var(--font-sans);
+}
+
+.diff-num {
+  width: 1%;
+  min-width: 4ch;
+  padding: 0 8px;
+  text-align: right;
+  vertical-align: top;
+  color: var(--text-2);
+  user-select: none;
+  border-right: 1px solid var(--border-0);
+}
+
+.diff-num--before,
+.diff-num--after {
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-sign {
+  width: 2ch;
+  text-align: center;
+  vertical-align: top;
+  user-select: none;
+}
+
+.diff-code {
+  width: 99%;
+  padding: 0 12px;
+  white-space: pre;
+  vertical-align: top;
+}
+
+.diff-word {
+  border-radius: 2px;
+}
+
+/* -------------------------------------------------------------- keyframes */
+
+@keyframes cc-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes cc-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes console-toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .code-menu,
+  .tree-file-open,
+  .console-toast {
+    animation: none;
+  }
+}
+
+
+/* ########################################################## */
+/* ==== onboarding-misc styles (fragment) ==== */
+/* Onboarding.tsx: compact provider-setup card (inline, dismissible, never a
+   modal). TemplatesGallery.tsx: the 'Surprise me' dice chip variant.
+   Layout.tsx: relative timestamp inside the home recent-build cards. */
+
+/* -------------------------------------------------------- onboard card */
+
+.onboard-card {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-4);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-l);
+  background: var(--bg-2);
+  box-shadow: var(--shadow-2);
+  text-align: left;
+}
+
+/* Home hero flow: centered, never wider than the composer column. */
+.home .onboard-card {
+  width: min(560px, 100%);
+  margin: 22px auto 0;
+}
+
+/* Work view: the card drops into the chat column. */
+.work-chat .onboard-card {
+  flex: 0 0 auto;
+  width: auto;
+  margin: var(--sp-3) var(--sp-3) 0;
+}
+
+.onboard-card-icon {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(94, 140, 255, 0.28);
+  border-radius: var(--radius-m);
+  background: var(--accent-dim);
+  color: var(--accent-text);
+}
+
+.onboard-card-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.onboard-kicker {
+  margin: 0;
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+
+.onboard-title {
+  margin: 0;
+  font-size: var(--fs-title);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text-0);
+}
+
+.onboard-note {
+  margin: 0;
+  max-width: 56ch;
+  font-size: var(--fs-body);
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.onboard-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  margin-top: var(--sp-1);
+}
+
+.onboard-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: var(--sp-2) var(--sp-3);
+}
+
+.onboard-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.onboard-success {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  margin-top: var(--sp-1);
+}
+
+/* The close button pins to the card corner; .icon-btn supplies the chrome. */
+.onboard-dismiss {
+  position: absolute;
+  top: var(--sp-2);
+  right: var(--sp-2);
+}
+
+/* ------------------------------------------------- dice 'surprise me' chip */
+/* Variant of .tpl-chip: dashed outline reads as 'random pick' without
+   introducing a second accent color. */
+
+.tpl-chip--dice {
+  border-style: dashed;
+  color: var(--text-2);
+}
+
+.tpl-chip--dice:hover:not(:disabled) {
+  color: var(--accent-text);
+  border-color: rgba(94, 140, 255, 0.55);
+}
+
+.tpl-chip-icon--dice {
+  color: var(--text-2);
+  transition:
+    color var(--dur-fast) var(--ease),
+    transform var(--dur) var(--ease);
+}
+
+.tpl-chip--dice:hover:not(:disabled) .tpl-chip-icon--dice {
+  color: var(--accent);
+}
+
+/* A quarter-turn 'roll' on hover; stays static under reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .tpl-chip--dice:hover:not(:disabled) .tpl-chip-icon--dice {
+    transform: rotate(90deg);
+  }
+}
+
+/* ------------------------------------------------------------ recent-time */
+/* Right-aligned timestamp in the .recent-top row of home recent cards. */
+
+.recent-time {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: var(--fs-small);
+  white-space: nowrap;
 }

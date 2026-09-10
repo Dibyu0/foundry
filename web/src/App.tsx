@@ -420,7 +420,12 @@ export function App() {
   /* ------------------------------ render ------------------------------ */
 
   const setupNeeded =
-    configError !== null || (config !== null && (config.provider === 'mock' || !config.hasKey));
+    configError !== null ||
+    (config !== null &&
+      (config.provider === 'mock' ||
+        // Keyless providers (ollama, mock) never need setup; hosted ones
+        // need a key. The endpoint also counts for openai-compatible.
+        (config.provider !== 'ollama' && !config.hasKey)));
   const showSetup = !configLoading && ((setupNeeded && !setupDismissed) || setupOpen);
   const pendingQuestion = current?.pendingQuestion ?? null;
   const plan = current?.plan ?? null;
