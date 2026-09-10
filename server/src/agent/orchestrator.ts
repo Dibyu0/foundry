@@ -51,6 +51,8 @@ export const MAX_ERROR_MESSAGE_CHARS = 4000;
 const MAX_QUESTION_ROUNDS = 2;
 const MAX_PENDING_QUESTIONS = 4;
 const MAX_NUDGES = 3;
+/** What autopilot answers when the planner asks; lets it choose and move on. */
+const AUTOPILOT_ANSWER = 'You decide — pick whatever fits the brief best and continue.';
 const MAX_LIST = 50;
 const DEFAULT_MAX_CONCURRENT = 10;
 const PROSE_CAP = 2000;
@@ -97,6 +99,8 @@ export interface BuildState {
   updatedAt: number;
   queued: boolean;
   paused: boolean;
+  /** Hands-free mode: plans auto-approve, planner questions auto-answer. */
+  autopilot: boolean;
   messages: BuildMessage[];
   files: FileEntry[];
   pendingQuestion?: Question;
@@ -165,6 +169,8 @@ interface BuildRecord {
   envNotes: EnvReport | undefined;
   questionRounds: number;
   paused: boolean;
+  /** Hands-free mode: plans auto-approve, planner questions auto-answer. */
+  autopilot: boolean;
   pendingWork: PendingWork | undefined;
   // runtime-only (never persisted)
   abort: AbortController | undefined;
@@ -194,6 +200,7 @@ interface Snapshot {
   envNotes?: EnvReport;
   questionRounds: number;
   paused?: boolean;
+  autopilot?: boolean;
   pendingWork?: PendingWork;
 }
 
@@ -492,7 +499,7 @@ export class Orchestrator {
     return o;
   }
 
-  createBuild(briefInput: string): { id: string; queued: boolean } {
+  createBuild(briefInput: string, opts?: { autopilot?: boolean }): { id: string; queued: boolean } {
     const brief = typeof briefInput === 'string' ? briefInput.trim() : '';
     if (brief === '') throw new ApiError(400, 'brief must be a non-empty string');
     if (brief.length > MAX_BRIEF_CHARS) {
@@ -517,6 +524,7 @@ export class Orchestrator {
       envNotes: undefined,
       questionRounds: 0,
       paused: false,
+      autopilot: opts?.autopilot === true,
       pendingWork: undefined,
       abort: undefined,
       running: false,
@@ -527,10 +535,48 @@ export class Orchestrator {
     };
     this.builds.set(b.id, b);
     this.pushMessage(b, { role: 'user', text: brief });
+    if (b.autopilot) {
+      this.pushMessage(b, { role: 'system', text: 'Autopilot on — plans auto-approve and questions auto-answer.' });
+    }
     this.emit(b, { type: 'phase', phase: 'INTAKE' });
     this.persist(b);
     this.activate(b.id);
     return { id: b.id, queued: b.queued };
+  }
+
+  /**
+   * Toggles hands-free mode on a build. Enabling it while the build is parked
+   * immediately drives forward: a pending plan auto-approves, a pending
+   * question chain auto-answers with AUTOPILOT_ANSWER.
+   */
+  setAutopilot(id: string, enabledInput: unknown): BuildState {
+    const enabled = enabledInput === true;
+    const b = this.mustGet(id);
+    if (b.autopilot === enabled) return this.toState(b);
+    b.autopilot = enabled;
+    this.pushMessage(b, {
+      role: 'system',
+      text: enabled ? 'Autopilot on — plans auto-approve and questions auto-answer.' : 'Autopilot off — the build waits for you at plans and questions.',
+    });
+    this.persist(b);
+    if (enabled && b.phase === 'PLANNED' && b.plan !== undefined) {
+      return this.approve(id);
+    }
+    if (enabled && b.phase === 'INTAKE' && b.pendingQuestion !== undefined) {
+      const pending = [b.pendingQuestion, ...b.questionQueue];
+      for (const q of pending) {
+        const entry = b.qaLog.find((e) => e.question.id === q.id && e.answer === undefined);
+        if (entry !== undefined) entry.answer = AUTOPILOT_ANSWER;
+        else b.qaLog.push({ question: q, answer: AUTOPILOT_ANSWER });
+      }
+      b.questionQueue = [];
+      b.pendingQuestion = undefined;
+      this.pushMessage(b, { role: 'user', text: AUTOPILOT_ANSWER });
+      this.pushMessage(b, { role: 'system', text: 'Autopilot answered on your behalf.' });
+      this.persist(b);
+      this.activate(id);
+    }
+    return this.toState(b);
   }
 
   list(): BuildSummary[] {
@@ -1430,6 +1476,19 @@ export class Orchestrator {
             for (const q of result.questions) b.qaLog.push({ question: q });
             this.emit(b, { type: 'question', question: first });
             this.persist(b);
+            if (b.autopilot) {
+              for (const q of [first, ...b.questionQueue]) {
+                const entry = b.qaLog.find((e) => e.question.id === q.id && e.answer === undefined);
+                if (entry !== undefined) entry.answer = AUTOPILOT_ANSWER;
+              }
+              b.questionQueue = [];
+              b.pendingQuestion = undefined;
+              this.pushMessage(b, { role: 'user', text: AUTOPILOT_ANSWER });
+              this.pushMessage(b, { role: 'system', text: 'Autopilot answered on your behalf.' });
+              this.persist(b);
+              messages.push({ role: 'user', content: AUTOPILOT_ANSWER });
+              continue;
+            }
           }
           throw new Parked();
         }
@@ -1456,6 +1515,15 @@ export class Orchestrator {
           b.pendingQuestion = undefined;
           b.questionQueue = [];
           this.emit(b, { type: 'plan', plan: toClientPlan(planAccepted) });
+          if (b.autopilot) {
+            // Hands-free: approve in place and let the drive flow into the
+            // build stages without parking for a click.
+            this.pushMessage(b, { role: 'system', text: 'Plan auto-approved — build started.' });
+            this.setPhase(b, 'BUILDING');
+            this.activity(b, 'planner', 'done');
+            this.persist(b);
+            return;
+          }
           this.setPhase(b, 'PLANNED');
           this.activity(b, 'planner', 'done');
           this.persist(b);
@@ -1678,6 +1746,7 @@ export class Orchestrator {
       updatedAt: b.updatedAt,
       queued: b.queued,
       paused: b.paused,
+      autopilot: b.autopilot,
       messages: b.messages.map((m) => ({ ...m })),
       files: b.files.map((f) => ({ ...f })),
       ...(b.pendingQuestion !== undefined ? { pendingQuestion: b.pendingQuestion } : {}),
@@ -1714,6 +1783,7 @@ export class Orchestrator {
       ...(b.envNotes !== undefined ? { envNotes: b.envNotes } : {}),
       questionRounds: b.questionRounds,
       ...(b.paused ? { paused: true } : {}),
+      ...(b.autopilot ? { autopilot: true } : {}),
       ...(b.pendingWork !== undefined ? { pendingWork: b.pendingWork } : {}),
     };
     const json = JSON.stringify(snapshot);
@@ -1758,6 +1828,7 @@ export class Orchestrator {
           : undefined,
       questionRounds: typeof s.questionRounds === 'number' ? s.questionRounds : 0,
       paused: s.paused === true,
+      autopilot: s.autopilot === true,
       pendingWork: revivePendingWork(s.pendingWork),
       abort: undefined,
       running: false,

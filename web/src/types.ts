@@ -88,6 +88,8 @@ export interface BuildState {
   siteUrl?: string;
   error?: string;
   createdAt?: number;
+  /** Hands-free mode: plans auto-approve, planner questions auto-answer. */
+  autopilot?: boolean;
 }
 
 export interface BuildSummary {

@@ -6033,3 +6033,63 @@ button img, button svg, .btn img, .btn svg { vertical-align: middle; }
     animation: none;
   }
 }
+
+
+/* -------------------------------------------------------- autopilot toggle */
+
+.auto-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border-0);
+  border-radius: var(--radius-pill);
+  background: var(--bg-2);
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-small);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.auto-toggle:hover {
+  background: var(--bg-3);
+  border-color: var(--border-1);
+  color: var(--text-1);
+}
+
+.auto-toggle .auto-toggle-state {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.75;
+}
+
+.auto-toggle.is-on {
+  color: var(--warm);
+  border-color: rgba(242, 166, 90, 0.45);
+  background: var(--warm-dim);
+}
+
+.auto-toggle.is-on:hover {
+  color: var(--warm);
+  border-color: rgba(242, 166, 90, 0.65);
+}
+
+.auto-toggle.is-on .auto-toggle-state {
+  opacity: 1;
+}
+
+.home-auto {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  font-size: var(--fs-small);
+}

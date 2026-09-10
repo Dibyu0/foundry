@@ -144,6 +144,16 @@ INTAKE ──► PLANNED ──► BUILDING ──► REVIEW ──► DONE
    └───────────┴──────────┴───────────┴──► ERROR   (or CANCELLED, anytime)
 ```
 
+**Autopilot (hands-free mode).** Toggle Autopilot in the top bar (or on the
+home page) and the build runs start to finish without a single click: the
+planner's clarifying questions are answered for you ("You decide — pick
+whatever fits the brief best") and the plan auto-approves the moment it
+lands, so the pipeline flows `INTAKE ──► BUILDING` with no parked states.
+The toggle is remembered for new builds, and flipping it on a build that is
+already parked — at a question or at plan approval — immediately drives it
+forward. Autopilot state is per-build, persisted, and shown live in the
+top bar.
+
 ## Security model
 
 Foundry is built to be safe to run on your own machine and network:

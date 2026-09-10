@@ -264,6 +264,7 @@ function normState(raw: unknown, id: string): BuildState {
   if (error) state.error = error;
   const createdAt = num(s.createdAt) ?? num(s.created);
   if (createdAt) state.createdAt = createdAt;
+  if (typeof s.autopilot === 'boolean') state.autopilot = s.autopilot;
   return state;
 }
 
@@ -310,11 +311,19 @@ export function putConfig(cfg: {
   return request('/api/config', { method: 'PUT', body: JSON.stringify(cfg) });
 }
 
-export async function createBuild(brief: string): Promise<{ id: string }> {
-  const raw = await request<unknown>('/api/builds', { method: 'POST', body: JSON.stringify({ brief }) });
+export async function createBuild(brief: string, autopilot = false): Promise<{ id: string }> {
+  const raw = await request<unknown>('/api/builds', { method: 'POST', body: JSON.stringify({ brief, autopilot }) });
   const id = str(rec(raw)?.id);
   if (!id) throw new ApiError(0, 'Server accepted the build but returned no id.');
   return { id };
+}
+
+export async function postAutopilot(id: string, enabled: boolean): Promise<BuildState> {
+  const raw = await request<unknown>(`/api/builds/${encodeURIComponent(id)}/autopilot`, {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  });
+  return normState(raw, id);
 }
 
 export async function listBuilds(): Promise<BuildSummary[]> {

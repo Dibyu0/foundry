@@ -8,6 +8,7 @@ import {
   openBuildEvents,
   postAnswer,
   postApprove,
+  postAutopilot,
   postCancel,
   postEdit,
   type StreamHandle,
@@ -72,6 +73,13 @@ export function App() {
   const [buildLoading, setBuildLoading] = useState(false);
   const [activity, setActivity] = useState<Record<string, ActivityEvent>>({});
   const [liveText, setLiveText] = useState<Record<string, string>>({});
+  const [autopilot, setAutopilotState] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('foundry.autopilot') === '1';
+    } catch {
+      return false;
+    }
+  });
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('idle');
   const [approved, setApproved] = useState(false);
 
@@ -295,7 +303,7 @@ export function App() {
       setBuildLoading(false);
       setSending(true);
       try {
-        const { id } = await createBuild(brief);
+        const { id } = await createBuild(brief, autopilot);
         setActivity({});
         setLiveText({});
         setApproved(false);
@@ -326,7 +334,7 @@ export function App() {
         setSending(false);
       }
     },
-    [notify, refreshBuilds, seedMessages],
+    [notify, refreshBuilds, seedMessages, autopilot],
   );
 
   const answer = useCallback(
@@ -408,6 +416,7 @@ export function App() {
         seedMessages(state.messages);
         setActivity({});
         setLiveText({});
+        if (typeof state.autopilot === 'boolean') setAutopilotState(state.autopilot);
         // Only phases past planning count as approved — an INTAKE build
         // still needs its Approve button when the plan arrives.
         setApproved(['BUILDING', 'REVIEW', 'DONE'].includes(state.phase));
@@ -438,6 +447,35 @@ export function App() {
     setSetupOpen(true);
     setChatCollapsed(false);
   }, []);
+
+  /** Hands-free mode: persists as the default for new builds and flips the
+   *  current build's mode live (a parked build drives forward immediately). */
+  const toggleAutopilot = useCallback(
+    async (enabled: boolean) => {
+      const prev = autopilot;
+      setAutopilotState(enabled);
+      try {
+        window.localStorage.setItem('foundry.autopilot', enabled ? '1' : '0');
+      } catch {
+        /* private mode: session-only */
+      }
+      const id = currentIdRef.current;
+      if (id === null) return;
+      try {
+        const s = await postAutopilot(id, enabled);
+        if (currentIdRef.current === id) setCurrent(s);
+      } catch (e) {
+        setAutopilotState(prev);
+        try {
+          window.localStorage.setItem('foundry.autopilot', prev ? '1' : '0');
+        } catch {
+          /* ignore */
+        }
+        notify('error', errorMessage(e));
+      }
+    },
+    [autopilot, notify],
+  );
 
   const dismissSetup = useCallback(() => {
     setSetupDismissed(true);
@@ -482,6 +520,8 @@ export function App() {
       chatCollapsed={chatCollapsed}
       onToggleChat={() => setChatCollapsed((c) => !c)}
       onNewBuild={newBuild}
+      autopilot={autopilot}
+      onToggleAutopilot={(enabled) => void toggleAutopilot(enabled)}
       setupCard={
         showSetup ? (
           <SetupCard

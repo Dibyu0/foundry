@@ -59,7 +59,10 @@ export function createAgentRouter(deps: AgentRouterDeps): Router {
     handle((req, res) => {
       const body = bodyObject(req);
       if (typeof body.brief !== 'string') throw new ApiError(400, 'brief must be a string');
-      const { id, queued } = orchestrator.createBuild(body.brief);
+      if (body.autopilot !== undefined && typeof body.autopilot !== 'boolean') {
+        throw new ApiError(400, 'autopilot must be a boolean when provided');
+      }
+      const { id, queued } = orchestrator.createBuild(body.brief, { autopilot: body.autopilot === true });
       res.status(202).json({ id, queued });
     }),
   );
@@ -102,6 +105,15 @@ export function createAgentRouter(deps: AgentRouterDeps): Router {
         throw new ApiError(400, 'plan must be an object when provided');
       }
       res.json(orchestrator.approve(paramId(req), body.plan));
+    }),
+  );
+
+  router.post(
+    '/:id/autopilot',
+    handle((req, res) => {
+      const body = bodyObject(req);
+      if (typeof body.enabled !== 'boolean') throw new ApiError(400, 'enabled must be a boolean');
+      res.json(orchestrator.setAutopilot(paramId(req), body.enabled));
     }),
   );
 

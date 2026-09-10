@@ -62,6 +62,10 @@ export interface LayoutProps {
   onToggleChat: () => void;
   onNewBuild: () => void;
 
+  /* hands-free mode */
+  autopilot: boolean;
+  onToggleAutopilot: (enabled: boolean) => void;
+
   /* slots owned by App */
   setupCard: ReactNode;
   chat: ReactNode;
@@ -143,6 +147,31 @@ function ProviderPill({ p }: { p: LayoutProps }) {
       <span className="provider-pill-dot" aria-hidden="true" />
       <span className="provider-pill-label">{label}</span>
       {state === 'ok' && p.config !== null && <span className="provider-pill-model">{p.config.model}</span>}
+    </button>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Autopilot toggle                                                    */
+/* ------------------------------------------------------------------ */
+
+function AutopilotToggle({ p }: { p: LayoutProps }) {
+  return (
+    <button
+      type="button"
+      className={`auto-toggle${p.autopilot ? ' is-on' : ''}`}
+      onClick={() => p.onToggleAutopilot(!p.autopilot)}
+      aria-pressed={p.autopilot}
+      title="Autopilot: approves the plan and answers planner questions for you — the build runs start to finish without clicks"
+    >
+      <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+        <path
+          d="M6.7 1 2.6 6.6h2.5L5.3 11l4.1-5.6H6.9L6.7 1z"
+          fill="currentColor"
+        />
+      </svg>
+      <span className="auto-toggle-label">Autopilot</span>
+      <span className="auto-toggle-state">{p.autopilot ? 'on' : 'off'}</span>
     </button>
   );
 }
@@ -236,6 +265,7 @@ function TopBar({ p, historyOpen, historyToggleRef, onToggleHistory }: TopBarPro
       )}
 
       <div className="topbar-actions">
+        <AutopilotToggle p={p} />
         <ProviderPill p={p} />
         {p.mode === 'work' && (
           <button
@@ -470,6 +500,11 @@ function HomeView({ p, onShowHistory }: { p: LayoutProps; onShowHistory: () => v
             onSend={p.onSendBrief}
             composerRef={p.composerRef}
           />
+        </div>
+
+        <div className="home-auto">
+          <AutopilotToggle p={p} />
+          <span className="muted">approves the plan and answers questions for you</span>
         </div>
 
         <div className="home-templates">

@@ -514,3 +514,83 @@ describe('agent routes', () => {
     }
   });
 });
+
+describe('autopilot', () => {
+  it('runs hands-free: questions auto-answer, plan auto-approves, build reaches DONE', { timeout: 30_000 }, async () => {
+    const w = await world();
+    const { id } = w.orchestrator.createBuild('A landing page for a small bakery', { autopilot: true });
+
+    await waitFor(() => w.orchestrator.get(id)?.phase === 'DONE', 'hands-free done', 20_000);
+
+    const state = w.orchestrator.get(id);
+    expect(state?.autopilot).toBe(true);
+    expect(state?.pendingQuestion).toBeUndefined();
+    expect(state?.files.map((f) => f.path).sort()).toEqual([
+      'README.md',
+      'animations.css',
+      'app.js',
+      'index.html',
+      'styles.css'
+    ]);
+    // Both mock questions were answered by autopilot, not a human.
+    const texts = (state?.messages ?? []).map((m) => m.text);
+    expect(texts.some((t) => t.includes('Autopilot on'))).toBe(true);
+    expect(texts.some((t) => t.includes('Autopilot answered on your behalf.'))).toBe(true);
+    expect(texts.some((t) => t.includes('Plan auto-approved — build started.'))).toBe(true);
+    expect(texts.some((t) => t.includes('Plan approved — build started.'))).toBe(false);
+    // The question still surfaced live even though nobody clicked an answer.
+    const types = eventTypes(w.events, id);
+    expect(types.filter((t) => t === 'question').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('enabling autopilot on a build parked at plan approval auto-approves it', { timeout: 30_000 }, async () => {
+    const w = await world();
+    const { id } = w.orchestrator.createBuild('A landing page for a small bakery');
+    await waitFor(() => w.orchestrator.get(id)?.pendingQuestion !== undefined, 'first question');
+    w.orchestrator.answer(id, 'q1', 'A small-business landing page');
+    w.orchestrator.answer(id, 'q2', 'Clean and minimal');
+    await waitFor(() => w.orchestrator.get(id)?.phase === 'PLANNED', 'plan');
+
+    const s = w.orchestrator.setAutopilot(id, true);
+    expect(s.autopilot).toBe(true);
+
+    await waitFor(() => w.orchestrator.get(id)?.phase === 'DONE', 'done after toggle', 20_000);
+    const texts = (w.orchestrator.get(id)?.messages ?? []).map((m) => m.text);
+    expect(texts.some((t) => t.includes('Autopilot on'))).toBe(true);
+    // The parked plan took the normal approval path once enabled.
+    expect(texts.some((t) => t.includes('Plan approved — build started.'))).toBe(true);
+  });
+
+  it('enabling autopilot on a build parked at a question auto-answers and continues', { timeout: 30_000 }, async () => {
+    const w = await world();
+    const { id } = w.orchestrator.createBuild('A landing page for a small bakery');
+    await waitFor(() => w.orchestrator.get(id)?.pendingQuestion !== undefined, 'first question');
+
+    w.orchestrator.setAutopilot(id, true);
+
+    await waitFor(() => w.orchestrator.get(id)?.pendingQuestion === undefined, 'question cleared');
+    await waitFor(() => w.orchestrator.get(id)?.phase === 'DONE', 'hands-free done', 20_000);
+    const texts = (w.orchestrator.get(id)?.messages ?? []).map((m) => m.text);
+    expect(texts.some((t) => t.includes('Autopilot answered on your behalf.'))).toBe(true);
+  });
+
+  it('autopilot survives a snapshot revive', async () => {
+    const w = await world();
+    const { id } = w.orchestrator.createBuild('A landing page', { autopilot: true });
+    await waitFor(() => w.orchestrator.get(id) !== undefined, 'registered');
+    await w.orchestrator.flush();
+
+    const hub2 = new SseHub({ heartbeatMs: 600_000 });
+    try {
+      const revived = await Orchestrator.open({
+        sitesRoot: w.sitesRoot,
+        dataDir: w.dataDir,
+        hub: hub2,
+        getProvider: () => createMockProvider(),
+      });
+      expect(revived.get(id)?.autopilot).toBe(true);
+    } finally {
+      hub2.shutdown();
+    }
+  });
+});
