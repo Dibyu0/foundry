@@ -789,7 +789,7 @@ describe('kimi (openai-compatible) provider', () => {
     expect(req.method).toBe('POST');
     expect(req.headers.authorization).toBe('Bearer sk-test');
     const body = req.body as { model: string; stream: boolean; messages: Array<{ role: string }> };
-    expect(body.model).toBe('kimi-k2-0711-preview');
+    expect(body.model).toBe('kimi-k2.7-code-highspeed');
     expect(body.stream).toBe(false);
     expect(body.messages[2]!.role).toBe('user');
   });

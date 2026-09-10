@@ -1,6 +1,6 @@
 {
   "name": "foundry",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "description": "Foundry — a self-hosted agentic website builder. Give it instructions; it asks, plans, builds and previews real websites using a team of AI agents.",
   "type": "module",

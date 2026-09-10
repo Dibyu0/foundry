@@ -557,7 +557,7 @@ function extractChoiceContent(payload: unknown, streaming: boolean): string {
 }
 
 const KIMI_DEFAULT_ENDPOINT = 'https://api.moonshot.ai/v1';
-const KIMI_DEFAULT_MODEL = 'kimi-k2-0711-preview';
+const KIMI_DEFAULT_MODEL = 'kimi-k2.7-code-highspeed';
 
 export function createKimiProvider(config: HttpProviderConfig = {}): Provider {
   const endpoint = config.endpoint ?? KIMI_DEFAULT_ENDPOINT;
