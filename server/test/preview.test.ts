@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer } from '../src/index.js';
 import { writeSiteFile } from '../src/sites.js';
 
-const PREVIEW_CSP = "default-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:";
+const PREVIEW_CSP = "default-src 'self' 'unsafe-inline'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com";
 const SITE_ID = 'preview-test-site';
 
 let root: string;

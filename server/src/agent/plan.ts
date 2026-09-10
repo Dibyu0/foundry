@@ -27,7 +27,7 @@ export interface BuildPlan {
   pages?: string[];
 }
 
-/** Sanitize a model-supplied pages array into writable .html paths. */
+/** Sanitize a model-supplied pages array into writable .html paths, index.html first. */
 function normalizePages(raw: unknown): string[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const out: string[] = [];
@@ -40,7 +40,13 @@ function normalizePages(raw: unknown): string[] | undefined {
     out.push(p);
     if (out.length >= 8) break;
   }
-  return out.length > 0 ? out : undefined;
+  if (out.length === 0) return undefined;
+  // A pages list without index.html first is invalid: the entry page must be
+  // generated, so it leads the list even when the model buries or omits it.
+  const indexAt = out.indexOf('index.html');
+  if (indexAt > 0) out.splice(indexAt, 1);
+  if (indexAt !== 0) out.unshift('index.html');
+  return out.slice(0, 8);
 }
 
 /** Review issue in the client-facing shape (web/src/types.ts ReviewIssue). */
@@ -122,7 +128,10 @@ export function normalizePlan(raw: unknown): BuildPlan | null {
 /**
  * Sanitizes a user-edited plan before approval. Valid edited fields win;
  * anything missing or unusable falls back to the current plan, and all
- * normal caps/path rules are re-applied to the edited steps.
+ * normal caps/path rules are re-applied to the edited steps. Step id and
+ * detail merge by index: the web editor only sends titles/files back, so a
+ * step that omits them keeps the current step's values instead of losing
+ * the detail text to a from-scratch re-normalization.
  */
 export function applyPlanEdits(current: BuildPlan, edits: unknown): BuildPlan {
   if (!edits || typeof edits !== 'object' || Array.isArray(edits)) return current;
@@ -142,8 +151,25 @@ export function applyPlanEdits(current: BuildPlan, edits: unknown): BuildPlan {
     if (pages !== undefined) merged.pages = pages;
   }
   if (Array.isArray(o.steps)) {
-    const normalized = normalizePlan({ summary: merged.summary, steps: o.steps });
-    if (normalized !== null && normalized.steps.length > 0) merged.steps = normalized.steps;
+    const editedSteps: unknown[] = o.steps;
+    const normalized = normalizePlan({ summary: merged.summary, steps: editedSteps });
+    if (normalized !== null && normalized.steps.length > 0) {
+      merged.steps = normalized.steps.map((step, i) => {
+        const rawStep: unknown = editedSteps[i];
+        const ro =
+          rawStep && typeof rawStep === 'object' && !Array.isArray(rawStep)
+            ? (rawStep as Record<string, unknown>)
+            : null;
+        const prev = current.steps[i];
+        const id = ro === null ? null : asTrimmedString(ro.id, 60);
+        const detail = ro === null ? null : asTrimmedString(ro.detail ?? ro.description, 2000);
+        return {
+          ...step,
+          id: id ?? prev?.id ?? step.id,
+          detail: detail ?? prev?.detail ?? step.detail,
+        };
+      });
+    }
   }
   return merged;
 }
@@ -155,6 +181,25 @@ export function planFiles(plan: BuildPlan): string[] {
     for (const f of step.files) {
       if (!out.includes(f)) out.push(f);
     }
+  }
+  return out;
+}
+
+/**
+ * Html pages the plan declares, in plan order (index.html first for plans
+ * built by normalizePlan/applyPlanEdits). Only unique, store-safe .html
+ * names survive, so a persisted plan stays safe to consume; an empty result
+ * means a single-page plan. Mirrored by roles.ts for prompt rendering.
+ */
+export function planPages(plan: BuildPlan | undefined): string[] {
+  if (plan === undefined) return [];
+  const raw: unknown = plan.pages;
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const entry of raw) {
+    const p = sanitizeSitePath(entry);
+    if (p === null || !p.toLowerCase().endsWith('.html') || out.includes(p)) continue;
+    out.push(p);
   }
   return out;
 }

@@ -47,6 +47,23 @@ interface Bucket {
   resetAt: number;
 }
 
+/** Hard cap on tracked buckets so address rotation can't grow the map. */
+const MAX_BUCKETS = 10_000;
+
+/**
+ * Bucket key for a request. IPv6 clients trivially rotate source addresses
+ * inside their /64 to defeat per-address limiting, so all IPv6 addresses in
+ * the same /64 share one bucket (RFC 4941 makes per-address keys useless).
+ */
+function bucketKey(req: Request): string {
+  const ip = req.ip ?? req.socket.remoteAddress ?? 'unknown';
+  if (ip.includes(':')) {
+    const parts = ip.split(':');
+    if (parts.length > 4) return `${parts.slice(0, 4).join(':')}::/64`;
+  }
+  return ip;
+}
+
 /**
  * Fixed-window per-IP limiter. Answers 429 with a Retry-After header once
  * `max` requests inside the current window are exceeded.
@@ -58,11 +75,21 @@ export function rateLimit({ windowMs, max }: RateLimitOptions): RequestHandler {
     for (const [key, bucket] of buckets) {
       if (bucket.resetAt <= now) buckets.delete(key);
     }
+    // Rotation-resistant cap: shed the oldest entries past MAX_BUCKETS.
+    if (buckets.size > MAX_BUCKETS) {
+      const excess = buckets.size - MAX_BUCKETS;
+      let removed = 0;
+      for (const key of buckets.keys()) {
+        buckets.delete(key);
+        removed += 1;
+        if (removed >= excess) break;
+      }
+    }
   }, windowMs);
   sweeper.unref();
 
   return (req: Request, res: Response, next: NextFunction) => {
-    const key = req.ip ?? req.socket.remoteAddress ?? 'unknown';
+    const key = bucketKey(req);
     const now = Date.now();
     let bucket = buckets.get(key);
     if (!bucket || bucket.resetAt <= now) {

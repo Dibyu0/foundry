@@ -170,6 +170,35 @@ async function totals(sitesRoot: string, id: string): Promise<{ count: number; b
   return { count: entries.length, bytes: entries.reduce((sum, e) => sum + e.size, 0), sizes };
 }
 
+// Parallel writes to the same site race between the totals() check and
+// fs.writeFile: two writers can each observe a state where their own file
+// still fits, then both write, overshooting MAX_FILES / MAX_TOTAL_BYTES.
+// Serialize the check-and-write section per site id with a promise-chain
+// lock: each caller queues on the current chain tail, and the map entry is
+// dropped when the tail settles with nobody queued behind it, so idle
+// sites leave nothing in the map.
+const siteWriteLocks = new Map<string, Promise<void>>();
+
+async function withSiteWriteLock<T>(sitesRoot: string, id: string, critical: () => Promise<T>): Promise<T> {
+  const lockKey = `${path.resolve(sitesRoot)}${path.sep}${id}`;
+  const prev = siteWriteLocks.get(lockKey) ?? Promise.resolve();
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = prev.then(() => gate);
+  siteWriteLocks.set(lockKey, tail);
+  await prev;
+  try {
+    return await critical();
+  } finally {
+    release();
+    if (siteWriteLocks.get(lockKey) === tail) {
+      siteWriteLocks.delete(lockKey);
+    }
+  }
+}
+
 function normalizeRel(rel: string): string {
   return rel.split(path.sep).join('/');
 }
@@ -244,17 +273,21 @@ export async function writeSiteFile(
     }
   }
   const key = normalizeRel(rel);
-  const { count, bytes: total, sizes } = await totals(sitesRoot, id);
-  const replaced = sizes.get(key) ?? 0;
-  const isNew = !sizes.has(key);
-  if (isNew && count >= MAX_FILES) {
-    throw new SiteError('TOO_MANY_FILES', `site already has ${MAX_FILES} files`, 413);
-  }
-  if (total - replaced + bytes.length > MAX_TOTAL_BYTES) {
-    throw new SiteError('SITE_TOO_LARGE', `site would exceed ${MAX_TOTAL_BYTES} bytes`, 413);
-  }
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(target, bytes);
+  // The cap check and the write must be atomic against other writes to the
+  // same site, or parallel builder rounds overshoot the caps.
+  return withSiteWriteLock(sitesRoot, id, async () => {
+    const { count, bytes: total, sizes } = await totals(sitesRoot, id);
+    const replaced = sizes.get(key) ?? 0;
+    const isNew = !sizes.has(key);
+    if (isNew && count >= MAX_FILES) {
+      throw new SiteError('TOO_MANY_FILES', `site already has ${MAX_FILES} files`, 413);
+    }
+    if (total - replaced + bytes.length > MAX_TOTAL_BYTES) {
+      throw new SiteError('SITE_TOO_LARGE', `site would exceed ${MAX_TOTAL_BYTES} bytes`, 413);
+    }
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, bytes);
+  });
 }
 
 export async function readSiteFile(sitesRoot: string, id: string, rel: string): Promise<Buffer> {

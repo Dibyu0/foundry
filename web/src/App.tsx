@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ApiError,
   createBuild,
@@ -9,6 +9,7 @@ import {
   postAnswer,
   postApprove,
   postCancel,
+  postEdit,
   type StreamHandle,
 } from './api';
 import type {
@@ -24,14 +25,13 @@ import type {
 } from './types';
 import { isRunning } from './types';
 import { errorMessage } from './format';
-import { Logo } from './components/Logo';
+import { Layout } from './components/Layout';
 import { SetupCard } from './components/SetupCard';
 import { ChatColumn } from './components/ChatColumn';
 import { QuestionCard } from './components/QuestionCard';
 import { PlanView } from './components/PlanView';
 import { AgentTimeline } from './components/AgentTimeline';
 import { Workspace } from './components/Workspace';
-import { BuildsHistory, PhaseBadge } from './components/BuildsHistory';
 
 function phaseBanner(phase: Phase): string {
   switch (phase) {
@@ -61,6 +61,8 @@ export function App() {
   const [configLoading, setConfigLoading] = useState(true);
   const [configError, setConfigError] = useState<string | null>(null);
   const [setupDismissed, setSetupDismissed] = useState(false);
+  /* Manual open via the top-bar provider pill (auto-show still uses setupDismissed). */
+  const [setupOpen, setSetupOpen] = useState(false);
 
   const [builds, setBuilds] = useState<BuildSummary[]>([]);
   const [buildsLoading, setBuildsLoading] = useState(false);
@@ -216,6 +218,14 @@ export function App() {
           if (id) void refetchCurrent(id);
           break;
         }
+        case 'restored': {
+          // A checkpoint restore swapped the site on disk; refetch so the
+          // file list and preview reflect it.
+          const rid = currentIdRef.current;
+          if (rid) void refetchCurrent(rid);
+          notify('info', ev.checkpoint !== undefined ? `Restored checkpoint ${ev.checkpoint}.` : 'Checkpoint restored.');
+          break;
+        }
         case 'error':
           setCurrent((c) => (c ? { ...c, phase: 'ERROR', error: ev.error, pendingQuestion: null } : c));
           notify('error', ev.error);
@@ -256,6 +266,9 @@ export function App() {
   const sendBrief = useCallback(
     async (brief: string): Promise<boolean> => {
       loadTokenRef.current += 1;
+      // A new brief wins over any in-flight history load; don't leave the
+      // workspace stuck on its loading state forever.
+      setBuildLoading(false);
       setSending(true);
       try {
         const { id } = await createBuild(brief);
@@ -369,7 +382,9 @@ export function App() {
         if (loadTokenRef.current !== token) return;
         seedMessages(state.messages);
         setActivity({});
-        setApproved(state.phase !== 'PLANNED');
+        // Only phases past planning count as approved — an INTAKE build
+        // still needs its Approve button when the plan arrives.
+        setApproved(['BUILDING', 'REVIEW', 'DONE'].includes(state.phase));
         setCurrent(state);
       } catch (e) {
         if (loadTokenRef.current === token) notify('error', errorMessage(e));
@@ -387,124 +402,127 @@ export function App() {
     setApproved(false);
     setBuildLoading(false);
     setChatCollapsed(false);
-    composerRef.current?.focus();
+    // Defer: the ref rebinds to the home composer once the view flips.
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  }, []);
+
+  const openSetup = useCallback(() => {
+    setSetupDismissed(false);
+    setSetupOpen(true);
+    setChatCollapsed(false);
+  }, []);
+
+  const dismissSetup = useCallback(() => {
+    setSetupDismissed(true);
+    setSetupOpen(false);
   }, []);
 
   /* ------------------------------ render ------------------------------ */
 
   const setupNeeded =
     configError !== null || (config !== null && (config.provider === 'mock' || !config.hasKey));
-  const showSetup = !setupDismissed && !configLoading && setupNeeded;
+  const showSetup = !configLoading && ((setupNeeded && !setupDismissed) || setupOpen);
   const pendingQuestion = current?.pendingQuestion ?? null;
   const plan = current?.plan ?? null;
+  const currentFiles = current?.files;
+  const mentionFiles = useMemo(() => (currentFiles ?? []).map((f) => f.path), [currentFiles]);
 
   return (
-    <div className="app">
-      <header className="app-header">
-        <div className="brand">
-          <Logo />
-          <span className="brand-name">Foundry</span>
-        </div>
-
-        {current && <PhaseBadge phase={current.phase} />}
-        {streamStatus !== 'idle' && (
-          <span className={`stream-status stream--${streamStatus}`}>
-            <span className="dot" aria-hidden="true" />
-            {streamStatus === 'live' ? 'live' : streamStatus === 'lost' ? 'connection lost' : streamStatus}
-          </span>
-        )}
-        {streamStatus === 'lost' && (
-          <button type="button" className="btn btn--ghost btn--s" onClick={() => streamRef.current?.retry()}>
-            Reconnect
-          </button>
-        )}
-        {current?.error && current.phase === 'ERROR' && (
-          <span className="header-error" title={current.error}>
-            {current.error}
-          </span>
-        )}
-
-        <span className="header-spacer" />
-
-        {setupNeeded && setupDismissed && (
-          <button type="button" className="btn btn--ghost btn--s" onClick={() => setSetupDismissed(false)}>
-            Setup
-          </button>
-        )}
-        <BuildsHistory
-          builds={builds}
-          loading={buildsLoading}
-          error={buildsError}
-          currentId={current?.id}
-          onOpen={(id) => void openFromHistory(id)}
-          onRefresh={() => void refreshBuilds()}
-        />
-        <button
-          type="button"
-          className="btn btn--ghost btn--s"
-          onClick={() => setChatCollapsed((c) => !c)}
-          aria-expanded={!chatCollapsed}
-        >
-          {chatCollapsed ? 'Show chat' : 'Hide chat'}
-        </button>
-      </header>
-
-      <div className="app-body">
-        {!chatCollapsed && (
-          <aside className="chat-col">
-            {showSetup && (
-              <SetupCard
-                config={config}
-                loading={configLoading}
-                error={configError}
-                onSaved={() => void loadConfig()}
-                onRetry={() => void loadConfig()}
-                onDismiss={() => setSetupDismissed(true)}
-              />
-            )}
-            <ChatColumn
-              hasBuild={current !== null}
-              running={running}
-              messages={current?.messages ?? []}
-              sending={sending}
-              onSend={sendBrief}
-              composerRef={composerRef}
-              feedKey={`${pendingQuestion?.id ?? ''}:${plan ? 'plan' : ''}`}
-            >
-              {pendingQuestion && (
-                <QuestionCard question={pendingQuestion} busy={answering} onAnswer={(t) => void answer(t)} />
-              )}
-              {plan && (
-                <PlanView
-                  plan={plan}
-                  editable={!approved && current?.phase === 'PLANNED'}
-                  busy={approving}
-                  onApprove={(p) => void approve(p)}
-                />
-              )}
-            </ChatColumn>
-          </aside>
-        )}
-
-        <main className="workspace-col">
-          <AgentTimeline
-            activity={activity}
-            phase={current?.phase}
-            files={current?.files ?? []}
-            issues={current?.issues ?? []}
-            running={running}
-            cancelling={cancelling}
-            onCancel={() => void cancel()}
+    <Layout
+      mode={current !== null || buildLoading ? 'work' : 'home'}
+      build={current}
+      buildLoading={buildLoading}
+      streamStatus={streamStatus}
+      onReconnect={() => streamRef.current?.retry()}
+      config={config}
+      configLoading={configLoading}
+      configError={configError}
+      setupNeeded={setupNeeded}
+      onOpenSetup={openSetup}
+      builds={builds}
+      buildsLoading={buildsLoading}
+      buildsError={buildsError}
+      onOpenBuild={(id) => void openFromHistory(id)}
+      onRefreshBuilds={() => void refreshBuilds()}
+      sending={sending}
+      onSendBrief={sendBrief}
+      composerRef={composerRef}
+      chatCollapsed={chatCollapsed}
+      onToggleChat={() => setChatCollapsed((c) => !c)}
+      onNewBuild={newBuild}
+      setupCard={
+        showSetup ? (
+          <SetupCard
+            config={config}
+            loading={configLoading}
+            error={configError}
+            onSaved={() => void loadConfig()}
+            onRetry={() => void loadConfig()}
+            onDismiss={dismissSetup}
           />
-          <Workspace build={current} loading={buildLoading} onNewBuild={newBuild} />
-        </main>
-      </div>
-
-      {notice && (
-        <div className={`notice notice--${notice.kind}`} role="status">
-          {notice.text}
-        </div>
-      )}
-    </div>
+        ) : null
+      }
+      chat={
+        <ChatColumn
+          hasBuild={current !== null || buildLoading}
+          running={running}
+          messages={current?.messages ?? []}
+          sending={sending}
+          onSend={sendBrief}
+          mentionFiles={mentionFiles}
+          canDrain={current?.phase === 'DONE'}
+          onSendQueued={async (text) => {
+            // Drained prompts follow up on the finished build instead of
+            // silently replacing it with a new one.
+            if (current?.phase === 'DONE') {
+              try {
+                await postEdit(current.id, text);
+                return true;
+              } catch {
+                return false;
+              }
+            }
+            return sendBrief(text);
+          }}
+          onSendNow={async (text) => {
+            if (current && running) {
+              try {
+                await postCancel(current.id);
+              } catch {
+                /* already finished */
+              }
+            }
+            return sendBrief(text);
+          }}
+          composerRef={composerRef}
+          feedKey={`${pendingQuestion?.id ?? ''}:${plan ? 'plan' : ''}`}
+        >
+          {pendingQuestion && (
+            <QuestionCard question={pendingQuestion} busy={answering} onAnswer={(t) => void answer(t)} />
+          )}
+          {plan && (
+            <PlanView
+              plan={plan}
+              editable={!approved && current?.phase === 'PLANNED'}
+              busy={approving}
+              onApprove={(p) => void approve(p)}
+            />
+          )}
+        </ChatColumn>
+      }
+      timeline={
+        <AgentTimeline
+          activity={activity}
+          phase={current?.phase}
+          files={current?.files ?? []}
+          issues={current?.issues ?? []}
+          running={running}
+          cancelling={cancelling}
+          onCancel={() => void cancel()}
+        />
+      }
+      workspace={<Workspace build={current} loading={buildLoading} onNewBuild={newBuild} />}
+      notice={notice}
+    />
   );
 }

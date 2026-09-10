@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { MentionItem } from '../types';
 import { enhancePrompt } from '../api';
 import { errorMessage } from '../format';
@@ -12,6 +12,7 @@ import {
   type PromptQueue,
   type QueuedPrompt,
 } from '../lib/pure';
+import { AtIcon, CloseIcon, MicIcon, PauseIcon, PlayIcon, SendIcon, SpinnerIcon, WandIcon } from './icons';
 
 /* ------------------------------------------------------------------ */
 /* Pure helpers local to the composer. The prompt-queue reducers come */
@@ -74,6 +75,14 @@ export function withMentions(draft: string, chips: readonly MentionItem[]): stri
   return base === '' ? refs : `${base}\n\n${refs}`;
 }
 
+export type EnhanceResolution = { kind: 'applied'; text: string } | { kind: 'discarded' };
+
+/** The enhanced prompt replaces the draft only when the draft is still
+ *  exactly what was sent; a concurrent edit wins over the late result. */
+export function resolveEnhancement(snapshot: string, current: string, enhanced: string): EnhanceResolution {
+  return current === snapshot ? { kind: 'applied', text: enhanced } : { kind: 'discarded' };
+}
+
 /* ------------------------------------------------------------------ */
 /* Component                                                          */
 /* ------------------------------------------------------------------ */
@@ -114,11 +123,20 @@ export function ChatComposer({
   const [enhancing, setEnhancing] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
+  const [composerNote, setComposerNote] = useState<string | null>(null);
 
   const queueIdRef = useRef(0);
-  /** Mutex: a drain or interrupt send is in flight — do not start another. */
+  /** Mutex: a drain or interrupt send is in flight - do not start another. */
   const drainingRef = useRef(false);
   const pendingCaretRef = useRef<number | null>(null);
+  /** Latest draft, so enhance() can compare it against its snapshot after the await. */
+  const draftRef = useRef(draft);
+  /** Set when an enhance resolves: focus the textarea once it re-enables. */
+  const focusComposerRef = useRef(false);
+  /** Queue item DOM nodes, for restoring focus after a removal. */
+  const queueItemRefs = useRef(new Map<string, HTMLLIElement>());
+  /** Where focus should go after the queue next renders ('composer' = textarea). */
+  const focusQueueIdRef = useRef<string | null>(null);
 
   /* ------------------------- queue auto-drain ------------------------ */
 
@@ -137,7 +155,7 @@ export function ChatComposer({
           // Nothing may be lost: put the prompt back and stop draining so a
           // failing send cannot spin. The user resumes when ready.
           setQueue((q) => ({ ...q, items: [next, ...q.items], paused: true }));
-          setComposerError('A queued prompt could not be sent — it is back at the front and the queue is paused.');
+          setComposerError('A queued prompt could not be sent - it is back at the front and the queue is paused.');
         }
       })
       .finally(() => {
@@ -183,6 +201,20 @@ export function ChatComposer({
     composerRef.current?.focus();
   }
 
+  /** The toolbar '@' button: inserts an '@' at the caret and opens the same popover as typing it. */
+  function openMentionPalette() {
+    const ta = composerRef.current;
+    if (!ta || sending || enhancing) return;
+    const caret = ta.selectionStart ?? draft.length;
+    const before = draft.slice(0, caret);
+    const insert = before !== '' && !/\s$/.test(before) ? ' @' : '@';
+    const nextCaret = caret + insert.length;
+    pendingCaretRef.current = nextCaret;
+    onDraftChange(before + insert + draft.slice(caret));
+    setMention({ query: '', active: 0 });
+    ta.focus();
+  }
+
   /* ----------------------------- sending ----------------------------- */
 
   const hasContent = draft.trim() !== '' || chips.length > 0;
@@ -196,6 +228,7 @@ export function ChatComposer({
     queueIdRef.current += 1;
     setQueue((q) => enqueuePrompt(q, { id: `q${queueIdRef.current}`, text }));
     setComposerError(null);
+    setComposerNote(null);
     onDraftChange('');
     setChips([]);
   }
@@ -208,6 +241,7 @@ export function ChatComposer({
       return;
     }
     setComposerError(null);
+    setComposerNote(null);
     const ok = await onSend(text);
     if (ok) {
       onDraftChange('');
@@ -221,6 +255,7 @@ export function ChatComposer({
     drainingRef.current = true;
     setInterrupting(true);
     setComposerError(null);
+    setComposerNote(null);
     try {
       const ok = await onSendNow(text);
       onDone(ok);
@@ -245,20 +280,61 @@ export function ChatComposer({
   function sendQueuedNow(item: QueuedPrompt) {
     if (!onSendNow) return;
     void interruptWith(item.text, (ok) => {
-      if (ok) setQueue((q) => removeQueuedPrompt(q, item.id));
+      if (ok) removeQueuedWithFocus(item.id);
     });
   }
 
+  /** Removes a queued prompt and moves focus to the nearest survivor (or the textarea). */
+  function removeQueuedWithFocus(id: string) {
+    setQueue((q) => {
+      const idx = q.items.findIndex((p) => p.id === id);
+      if (idx < 0) return q;
+      const rest = q.items.filter((p) => p.id !== id);
+      const neighbor = rest[Math.min(idx, rest.length - 1)];
+      focusQueueIdRef.current = neighbor ? neighbor.id : 'composer';
+      return removeQueuedPrompt(q, id);
+    });
+  }
+
+  useEffect(() => {
+    const target = focusQueueIdRef.current;
+    if (target === null) return;
+    focusQueueIdRef.current = null;
+    if (target === 'composer') composerRef.current?.focus();
+    else queueItemRefs.current.get(target)?.focus();
+  }, [queue, composerRef]);
+
   /* ------------------------------ enhance ---------------------------- */
 
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  /* The textarea is disabled while enhancing, so focus has to wait for the
+   * render that re-enables it. */
+  useEffect(() => {
+    if (enhancing || !focusComposerRef.current) return;
+    focusComposerRef.current = false;
+    composerRef.current?.focus();
+  }, [enhancing, composerRef]);
+
   async function enhance() {
-    const text = draft.trim();
+    const snapshot = draft;
+    const text = snapshot.trim();
     if (text === '' || enhancing || sending) return;
     setEnhancing(true);
     setComposerError(null);
+    setComposerNote(null);
     try {
-      onDraftChange(await enhancePrompt(text));
-      composerRef.current?.focus();
+      const resolved = resolveEnhancement(snapshot, draftRef.current, await enhancePrompt(text));
+      if (resolved.kind === 'applied') {
+        onDraftChange(resolved.text);
+      } else {
+        // The draft changed while the request was in flight: the user's text
+        // wins and the late enhanced copy is dropped, not clobbered over it.
+        setComposerNote('Enhance discarded - the draft changed while enhancing.');
+      }
+      focusComposerRef.current = true;
     } catch (e) {
       // Honest failure: the draft stays exactly as the user wrote it.
       setComposerError(errorMessage(e));
@@ -316,48 +392,247 @@ export function ChatComposer({
     }
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
-      setQueue((q) => removeQueuedPrompt(q, id));
+      removeQueuedWithFocus(id);
     }
   }
+
+  /* ------------------------------ auto-grow -------------------------- */
+
+  // 1-6 rows: JS pins the height to the content, CSS max-height caps it at
+  // six rows and overflow-y takes over from there. Instant, so it is safe
+  // under prefers-reduced-motion.
+  useLayoutEffect(() => {
+    const ta = composerRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${ta.scrollHeight}px`;
+  }, [draft, composerRef]);
 
   /* ------------------------------- render ---------------------------- */
 
   const visibleQueue = queueExpanded ? queue.items : queue.items.slice(0, QUEUE_PREVIEW_COUNT);
   const hint = running
-    ? `Build running — Ctrl+Enter queues the prompt (${queue.items.length}/${QUEUE_CAP})`
-    : 'Ctrl+Enter to send — @ to mention files';
+    ? `Build running - Ctrl+Enter queues the prompt (${queue.items.length}/${QUEUE_CAP})`
+    : 'Ctrl+Enter to send - @ to mention files';
 
   return (
-    <div className="composer">
-      {chips.length > 0 && (
-        <div className="composer-chips" role="group" aria-label="Attached mentions">
-          {chips.map((chip) => (
-            <span
-              key={chip.label}
-              className="mention-chip chip"
-              tabIndex={0}
-              aria-label={`Mention ${chip.label} — press Delete to remove`}
-              onKeyDown={(e) => {
-                if (e.key === 'Delete' || e.key === 'Backspace') {
-                  e.preventDefault();
-                  removeChip(chip.label);
-                }
-              }}
-            >
-              @{chip.label}
+    <div className={`composer${running ? ' composer--running' : ''}`}>
+      <div className="composer-card">
+        {queue.items.length > 0 && (
+          <section className="queue-panel" aria-labelledby="composer-queue-title">
+            <div className="queue-head">
+              <span className="queue-title" id="composer-queue-title">
+                Queued prompts
+              </span>
+              <span className="queue-count muted">
+                {queue.items.length}/{QUEUE_CAP}
+              </span>
+              {queue.paused && <span className="queue-paused">Paused</span>}
               <button
                 type="button"
-                className="icon-btn mention-chip-x"
-                aria-label={`Remove mention ${chip.label}`}
-                onClick={() => removeChip(chip.label)}
-                tabIndex={-1}
+                className="btn btn--ghost btn--s queue-toggle"
+                onClick={() => setQueue((q) => setPromptQueuePaused(q, !q.paused))}
+                aria-pressed={queue.paused}
+                title={queue.paused ? 'Resume sending queued prompts' : 'Pause the queue'}
               >
-                x
+                {queue.paused ? <PlayIcon size={12} /> : <PauseIcon size={12} />}
+                {queue.paused ? 'Resume' : 'Pause'}
+              </button>
+            </div>
+            <ul className="queue-list">
+              {visibleQueue.map((item, i) => (
+                <li
+                  key={item.id}
+                  ref={(el) => {
+                    if (el === null) queueItemRefs.current.delete(item.id);
+                    else queueItemRefs.current.set(item.id, el);
+                  }}
+                  className="queue-item"
+                  tabIndex={0}
+                  aria-label={`Queued prompt ${i + 1}: ${item.text}`}
+                  title="Alt+ArrowUp/Down to reorder, Delete to remove"
+                  onKeyDown={(e) => onQueueItemKeyDown(e, item.id)}
+                >
+                  <span className="queue-index muted" aria-hidden="true">
+                    {i + 1}
+                  </span>
+                  <span className="queue-text">{item.text}</span>
+                  {onSendNow && (
+                    <button
+                      type="button"
+                      className="btn btn--ghost btn--s queue-send-now"
+                      disabled={interrupting || sending}
+                      title="Cancel the running build and send this now"
+                      onClick={() => sendQueuedNow(item)}
+                    >
+                      Send now
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="icon-btn queue-remove"
+                    aria-label={`Remove queued prompt ${i + 1}`}
+                    onClick={() => removeQueuedWithFocus(item.id)}
+                  >
+                    <CloseIcon size={11} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {queue.items.length > QUEUE_PREVIEW_COUNT && (
+              <button
+                type="button"
+                className="btn btn--ghost btn--s queue-more"
+                onClick={() => setQueueExpanded((x) => !x)}
+                aria-expanded={queueExpanded}
+              >
+                {queueExpanded ? 'Show fewer' : `Show all ${queue.items.length} queued`}
+              </button>
+            )}
+          </section>
+        )}
+
+        <div className="composer-field">
+          {chips.length > 0 && (
+            <div className="composer-chips" role="group" aria-label="Attached mentions">
+              {chips.map((chip) => (
+                <span
+                  key={chip.label}
+                  className="mention-chip chip"
+                  tabIndex={0}
+                  aria-label={`Mention ${chip.label} - press Delete to remove`}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Delete' || e.key === 'Backspace') {
+                      e.preventDefault();
+                      removeChip(chip.label);
+                    }
+                  }}
+                >
+                  <span className="mention-chip-label">@{chip.label}</span>
+                  <button
+                    type="button"
+                    className="icon-btn mention-chip-x"
+                    aria-label={`Remove mention ${chip.label}`}
+                    onClick={() => removeChip(chip.label)}
+                    tabIndex={-1}
+                  >
+                    <CloseIcon size={10} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
+          <textarea
+            ref={composerRef}
+            className="composer-input"
+            placeholder={running ? 'Queue a follow-up while the build runs...' : 'Describe the website you want...'}
+            value={draft}
+            onChange={(e) => {
+              onDraftChange(e.target.value);
+              setComposerError(null);
+              setComposerNote(null);
+              refreshMention(e.target.value, e.target.selectionStart);
+            }}
+            onSelect={(e) => refreshMention(e.currentTarget.value, e.currentTarget.selectionStart)}
+            onBlur={() => setMention(null)}
+            onKeyDown={onKeyDown}
+            disabled={sending || enhancing}
+            rows={1}
+            aria-label="Website brief"
+            aria-describedby="composer-hint"
+            aria-keyshortcuts="Control+Enter Meta+Enter"
+            aria-expanded={mention !== null}
+            aria-controls={mention !== null ? 'mention-listbox' : undefined}
+            aria-activedescendant={mention !== null && candidates.length > 0 ? `mention-opt-${mention.active}` : undefined}
+          />
+        </div>
+
+        <div className="composer-bar">
+          <div className="composer-tools">
+            <button
+              type="button"
+              className="icon-btn composer-tool composer-tool--mention"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={openMentionPalette}
+              disabled={sending || enhancing}
+              aria-label="Mention a file, the site, or the preview"
+              aria-haspopup="listbox"
+              aria-expanded={mention !== null}
+              aria-controls={mention !== null ? 'mention-listbox' : undefined}
+              title="Mention (@)"
+            >
+              <AtIcon size={15} />
+            </button>
+            <button
+              type="button"
+              className={`icon-btn composer-tool composer-wand${enhancing ? ' is-working' : ''}`}
+              disabled={draft.trim() === '' || enhancing || sending}
+              onClick={() => void enhance()}
+              aria-label="Enhance prompt with AI"
+              aria-busy={enhancing}
+              title={enhancing ? 'Enhancing...' : 'Enhance prompt with AI'}
+            >
+              {enhancing ? <SpinnerIcon size={14} className="icon-spinner" /> : <WandIcon size={14} />}
+            </button>
+            <span className="composer-tool-wrap" title="Voice input coming later">
+              <button
+                type="button"
+                className="icon-btn composer-tool composer-tool--mic"
+                disabled
+                aria-label="Voice input (coming later)"
+              >
+                <MicIcon size={14} />
               </button>
             </span>
-          ))}
+          </div>
+
+          <span className="muted composer-hint" id="composer-hint">
+            {hint}
+          </span>
+
+          <div className="composer-actions">
+            {running && onSendNow && (
+              <button
+                type="button"
+                className="btn btn--ghost btn--s"
+                disabled={!canPrimary}
+                title="Cancel the running build and send this now"
+                onClick={() => sendDraftNow()}
+              >
+                Send now
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn btn--primary composer-send"
+              disabled={!canPrimary}
+              onClick={() => void primary()}
+              title={running ? 'Queue this prompt (Ctrl+Enter)' : 'Send (Ctrl+Enter)'}
+            >
+              <SendIcon size={14} className="composer-send-icon" />
+              <span className="composer-send-label">{sending ? 'Starting...' : running ? 'Queue' : 'Build it'}</span>
+              {!sending && (
+                <kbd className="kbd composer-send-kbd" aria-hidden="true">
+                  Ctrl+Enter
+                </kbd>
+              )}
+            </button>
+          </div>
         </div>
-      )}
+
+        {composerNote !== null && (
+          <p className="composer-note muted" role="status">
+            {composerNote}
+          </p>
+        )}
+
+        {composerError !== null && (
+          <p className="composer-error inline-error" role="alert">
+            {composerError}
+          </p>
+        )}
+      </div>
 
       {mention !== null && (
         <ul className="mention-pop" role="listbox" aria-label="Mention a file" id="mention-listbox">
@@ -382,129 +657,6 @@ export function ChatComposer({
             </li>
           ))}
         </ul>
-      )}
-
-      <textarea
-        ref={composerRef}
-        className="composer-input"
-        placeholder={running ? 'Queue a follow-up while the build runs…' : 'Describe the website you want…'}
-        value={draft}
-        onChange={(e) => {
-          onDraftChange(e.target.value);
-          setComposerError(null);
-          refreshMention(e.target.value, e.target.selectionStart);
-        }}
-        onSelect={(e) => refreshMention(e.currentTarget.value, e.currentTarget.selectionStart)}
-        onBlur={() => setMention(null)}
-        onKeyDown={onKeyDown}
-        disabled={sending}
-        rows={3}
-        aria-label="Website brief"
-        aria-expanded={mention !== null}
-        aria-controls={mention !== null ? 'mention-listbox' : undefined}
-        aria-activedescendant={mention !== null && candidates.length > 0 ? `mention-opt-${mention.active}` : undefined}
-      />
-
-      {queue.items.length > 0 && (
-        <div className="queue-panel" aria-label="Queued prompts">
-          <div className="queue-head">
-            <span className="muted">
-              Queued {queue.items.length}/{QUEUE_CAP}
-              {queue.paused ? ' — paused' : ''}
-            </span>
-            <button
-              type="button"
-              className="btn btn--ghost btn--s queue-toggle"
-              onClick={() => setQueue((q) => setPromptQueuePaused(q, !q.paused))}
-              aria-pressed={queue.paused}
-            >
-              {queue.paused ? 'Resume queue' : 'Pause queue'}
-            </button>
-          </div>
-          <ul className="queue-list">
-            {visibleQueue.map((item, i) => (
-              <li
-                key={item.id}
-                className="queue-item"
-                tabIndex={0}
-                aria-label={`Queued prompt ${i + 1}: ${item.text}`}
-                title="Alt+ArrowUp/Down to reorder, Delete to remove"
-                onKeyDown={(e) => onQueueItemKeyDown(e, item.id)}
-              >
-                <span className="queue-text">{item.text}</span>
-                {onSendNow && (
-                  <button
-                    type="button"
-                    className="btn btn--ghost btn--s queue-send-now"
-                    disabled={interrupting || sending}
-                    title="Cancel the running build and send this now"
-                    onClick={() => sendQueuedNow(item)}
-                  >
-                    Send now
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="icon-btn queue-remove"
-                  aria-label={`Remove queued prompt ${i + 1}`}
-                  onClick={() => setQueue((q) => removeQueuedPrompt(q, item.id))}
-                >
-                  x
-                </button>
-              </li>
-            ))}
-          </ul>
-          {queue.items.length > QUEUE_PREVIEW_COUNT && (
-            <button
-              type="button"
-              className="btn btn--ghost btn--s queue-more"
-              onClick={() => setQueueExpanded((x) => !x)}
-              aria-expanded={queueExpanded}
-            >
-              {queueExpanded ? 'Show fewer' : `Show all ${queue.items.length} queued`}
-            </button>
-          )}
-        </div>
-      )}
-
-      <div className="composer-bar">
-        <span className="muted composer-hint">{hint}</span>
-        <div className="composer-actions">
-          <button
-            type="button"
-            className="btn btn--ghost btn--s composer-wand"
-            disabled={draft.trim() === '' || enhancing || sending}
-            onClick={() => void enhance()}
-            aria-label="Enhance prompt with AI"
-            title="Enhance prompt with AI"
-          >
-            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
-              <path d="M2 14 L10 6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" fill="none" />
-              <path d="M11 1 l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z" fill="currentColor" />
-            </svg>
-            {enhancing ? 'Enhancing…' : 'Enhance'}
-          </button>
-          {running && onSendNow && (
-            <button
-              type="button"
-              className="btn btn--ghost btn--s"
-              disabled={!canPrimary}
-              title="Cancel the running build and send this now"
-              onClick={() => sendDraftNow()}
-            >
-              Send now
-            </button>
-          )}
-          <button type="button" className="btn btn--primary" disabled={!canPrimary} onClick={() => void primary()}>
-            {sending ? 'Starting…' : running ? 'Queue' : 'Build it'}
-          </button>
-        </div>
-      </div>
-
-      {composerError !== null && (
-        <p className="composer-error inline-error" role="alert">
-          {composerError}
-        </p>
       )}
     </div>
   );

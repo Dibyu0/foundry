@@ -1,3 +1,6 @@
+import { useState, type CSSProperties } from 'react';
+import { useRovingTabindex } from '../a11y';
+
 export type RecipeId = 'landing' | 'portfolio' | 'saas' | 'blog' | 'docs';
 
 export interface TemplateRecipe {
@@ -45,89 +48,88 @@ export const TEMPLATE_RECIPES: readonly TemplateRecipe[] = [
   },
 ];
 
-const INK = 'rgba(255, 255, 255, 0.26)';
-const INK_SOFT = 'rgba(255, 255, 255, 0.13)';
-const INK_FAINT = 'rgba(255, 255, 255, 0.08)';
-const ACCENT = 'rgba(255, 122, 69, 0.85)';
-const ACCENT_SOFT = 'rgba(255, 122, 69, 0.4)';
+const ICON_PROPS = {
+  className: 'tpl-chip-icon',
+  viewBox: '0 0 14 14',
+  width: 13,
+  height: 13,
+  'aria-hidden': true,
+  focusable: false,
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: 1.4,
+  strokeLinecap: 'round',
+  strokeLinejoin: 'round',
+} as const;
 
-function RecipePreview({ id }: { id: RecipeId }) {
+/** Compact 14px stroke glyphs, one per recipe. */
+function RecipeIcon({ id }: { id: RecipeId }) {
   switch (id) {
     case 'landing':
       return (
-        <svg className="tpl-svg" viewBox="0 0 112 72" aria-hidden="true" focusable="false">
-          <rect x="8" y="7" width="20" height="3" rx="1.5" fill={INK} />
-          <rect x="88" y="7" width="16" height="3" rx="1.5" fill={INK_SOFT} />
-          <rect x="8" y="18" width="42" height="5" rx="2" fill={INK} />
-          <rect x="8" y="26" width="30" height="3" rx="1.5" fill={INK_SOFT} />
-          <rect x="8" y="33" width="18" height="6" rx="3" fill={ACCENT} />
-          <rect x="64" y="14" width="40" height="30" rx="3" fill={INK_FAINT} />
-          <rect x="8" y="52" width="28" height="12" rx="2" fill={INK_FAINT} />
-          <rect x="42" y="52" width="28" height="12" rx="2" fill={INK_FAINT} />
-          <rect x="76" y="52" width="28" height="12" rx="2" fill={INK_FAINT} />
+        <svg {...ICON_PROPS}>
+          <path d="M4 12.5V2.5" />
+          <path d="M4 3h6.2L8.4 5.5l1.8 2.5H4" />
         </svg>
       );
     case 'portfolio':
       return (
-        <svg className="tpl-svg" viewBox="0 0 112 72" aria-hidden="true" focusable="false">
-          <rect x="8" y="7" width="36" height="5" rx="2" fill={INK} />
-          <rect x="8" y="15" width="24" height="3" rx="1.5" fill={INK_SOFT} />
-          <rect x="8" y="24" width="46" height="18" rx="2" fill={INK_SOFT} />
-          <rect x="58" y="24" width="46" height="18" rx="2" fill={ACCENT_SOFT} />
-          <rect x="8" y="46" width="46" height="18" rx="2" fill={INK_FAINT} />
-          <rect x="58" y="46" width="46" height="18" rx="2" fill={INK_SOFT} />
+        <svg {...ICON_PROPS}>
+          <rect x="2" y="2" width="4.2" height="4.2" rx="1" />
+          <rect x="7.8" y="2" width="4.2" height="4.2" rx="1" />
+          <rect x="2" y="7.8" width="4.2" height="4.2" rx="1" />
+          <rect x="7.8" y="7.8" width="4.2" height="4.2" rx="1" />
         </svg>
       );
     case 'saas':
       return (
-        <svg className="tpl-svg" viewBox="0 0 112 72" aria-hidden="true" focusable="false">
-          <rect x="8" y="10" width="38" height="5" rx="2" fill={INK} />
-          <rect x="8" y="18" width="28" height="3" rx="1.5" fill={INK_SOFT} />
-          <rect x="8" y="26" width="24" height="6" rx="3" fill={INK_SOFT} />
-          <rect x="34" y="26" width="12" height="6" rx="3" fill={ACCENT} />
-          <rect x="56" y="8" width="48" height="30" rx="3" fill={INK_FAINT} />
-          <rect x="61" y="13" width="38" height="4" rx="2" fill={INK_SOFT} />
-          <rect x="61" y="20" width="26" height="3" rx="1.5" fill={INK_SOFT} />
-          <rect x="8" y="46" width="30" height="20" rx="2" fill={INK_FAINT} />
-          <rect x="41" y="46" width="30" height="20" rx="2" fill={ACCENT_SOFT} />
-          <rect x="74" y="46" width="30" height="20" rx="2" fill={INK_FAINT} />
+        <svg {...ICON_PROPS}>
+          <path d="M2.5 12V8.5" />
+          <path d="M7 12V6" />
+          <path d="M11.5 12V2.5" />
         </svg>
       );
     case 'blog':
       return (
-        <svg className="tpl-svg" viewBox="0 0 112 72" aria-hidden="true" focusable="false">
-          <rect x="8" y="7" width="20" height="3" rx="1.5" fill={INK} />
-          <rect x="84" y="7" width="20" height="3" rx="1.5" fill={INK_SOFT} />
-          <rect x="8" y="14" width="96" height="16" rx="2" fill={INK_FAINT} />
-          <rect x="12" y="23" width="40" height="3" rx="1.5" fill={INK} />
-          <rect x="8" y="36" width="14" height="10" rx="2" fill={INK_SOFT} />
-          <rect x="26" y="37" width="60" height="3" rx="1.5" fill={INK_SOFT} />
-          <rect x="26" y="42" width="44" height="2" rx="1" fill={INK_FAINT} />
-          <rect x="8" y="52" width="14" height="10" rx="2" fill={INK_SOFT} />
-          <rect x="26" y="53" width="56" height="3" rx="1.5" fill={INK_SOFT} />
-          <rect x="26" y="58" width="40" height="2" rx="1" fill={INK_FAINT} />
+        <svg {...ICON_PROPS}>
+          <path d="M2.5 3.5h9" />
+          <path d="M2.5 7h9" />
+          <path d="M2.5 10.5h5.5" />
         </svg>
       );
     case 'docs':
       return (
-        <svg className="tpl-svg" viewBox="0 0 112 72" aria-hidden="true" focusable="false">
-          <rect x="8" y="8" width="24" height="56" rx="2" fill={INK_FAINT} />
-          <rect x="12" y="14" width="16" height="2" rx="1" fill={INK} />
-          <rect x="12" y="20" width="12" height="2" rx="1" fill={INK_SOFT} />
-          <rect x="12" y="26" width="14" height="2" rx="1" fill={INK_SOFT} />
-          <rect x="12" y="32" width="10" height="2" rx="1" fill={INK_SOFT} />
-          <rect x="38" y="10" width="44" height="5" rx="2" fill={INK} />
-          <rect x="38" y="20" width="66" height="2" rx="1" fill={INK_SOFT} />
-          <rect x="38" y="25" width="58" height="2" rx="1" fill={INK_FAINT} />
-          <rect x="38" y="33" width="66" height="14" rx="2" fill={INK_FAINT} />
-          <rect x="42" y="37" width="24" height="2" rx="1" fill={ACCENT} />
-          <rect x="42" y="41" width="34" height="2" rx="1" fill={INK_SOFT} />
-          <rect x="38" y="52" width="62" height="2" rx="1" fill={INK_SOFT} />
-          <rect x="38" y="57" width="48" height="2" rx="1" fill={INK_FAINT} />
+        <svg {...ICON_PROPS}>
+          <rect x="2" y="2" width="10" height="10" rx="1.5" />
+          <path d="M5.8 2v10" />
         </svg>
       );
   }
 }
+
+function DiceIcon() {
+  return (
+    <svg {...ICON_PROPS} className="tpl-chip-icon tpl-chip-icon--dice">
+      <rect x="1.5" y="1.5" width="11" height="11" rx="2.5" />
+      <circle cx="4.8" cy="4.8" r="1" fill="currentColor" stroke="none" />
+      <circle cx="7" cy="7" r="1" fill="currentColor" stroke="none" />
+      <circle cx="9.2" cy="9.2" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+/** Screen-reader-only live region (no shared utility class exists yet). */
+const SR_ONLY: CSSProperties = {
+  position: 'absolute',
+  width: '1px',
+  height: '1px',
+  padding: 0,
+  margin: '-1px',
+  overflow: 'hidden',
+  clip: 'rect(0 0 0 0)',
+  whiteSpace: 'nowrap',
+  border: 0,
+};
 
 interface TemplatesGalleryProps {
   disabled?: boolean;
@@ -135,27 +137,61 @@ interface TemplatesGalleryProps {
   onPick: (brief: string) => void;
 }
 
+/**
+ * The hero's template chips row: one pill per recipe plus a 'surprise me'
+ * dice chip that cycles recipe briefs into the composer. Composite widget:
+ * one Tab stop, ArrowLeft/ArrowRight (+ Home/End) move between chips.
+ */
 export function TemplatesGallery({ disabled = false, onPick }: TemplatesGalleryProps) {
+  const [cycle, setCycle] = useState(0);
+  const [announce, setAnnounce] = useState('');
+  const roving = useRovingTabindex<HTMLButtonElement>(TEMPLATE_RECIPES.length + 1, 'horizontal', {
+    wrap: true,
+  });
+
+  function surprise() {
+    const recipe = TEMPLATE_RECIPES[cycle % TEMPLATE_RECIPES.length];
+    setCycle((c) => c + 1);
+    setAnnounce(`Brief loaded: ${recipe.label}.`);
+    onPick(recipe.brief);
+  }
+
   return (
-    <div className="tpl-strip">
-      <span className="tpl-title">Start from a recipe</span>
-      <ul className="tpl-list">
-        {TEMPLATE_RECIPES.map((t) => (
+    <div className="tpl-chips" role="group" aria-label="Start from a template">
+      <ul className="tpl-chips-list" {...roving.containerProps}>
+        {TEMPLATE_RECIPES.map((t, i) => (
           <li key={t.id}>
             <button
               type="button"
-              className="tpl-card"
+              className="tpl-chip"
               disabled={disabled}
               title={`${t.label}: ${t.tagline}`}
               onClick={() => onPick(t.brief)}
+              {...roving.getItemProps(i)}
             >
-              <RecipePreview id={t.id} />
-              <span className="tpl-label">{t.label}</span>
-              <span className="tpl-tagline">{t.tagline}</span>
+              <RecipeIcon id={t.id} />
+              <span className="tpl-chip-label">{t.label}</span>
             </button>
           </li>
         ))}
+        <li>
+          <button
+            type="button"
+            className="tpl-chip tpl-chip--dice"
+            disabled={disabled}
+            title="Surprise me: cycle template briefs into the composer"
+            aria-label="Surprise me: fill the composer with the next template brief"
+            onClick={surprise}
+            {...roving.getItemProps(TEMPLATE_RECIPES.length)}
+          >
+            <DiceIcon />
+            <span className="tpl-chip-label">Surprise me</span>
+          </button>
+        </li>
       </ul>
+      <span style={SR_ONLY} role="status" aria-live="polite">
+        {announce}
+      </span>
     </div>
   );
 }

@@ -4,7 +4,13 @@ import { Router, type Request, type Response } from 'express';
 import { injectBridge } from '../previewInject.js';
 import { SiteError, resolveSitePath, siteExists } from '../sites.js';
 
-const PREVIEW_CSP = "default-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:";
+// Google Fonts is the one external origin the design recipe permits, so
+// the preview CSP must name both hosts or every generated site's
+// typography breaks inside the sandbox.
+const PREVIEW_CSP =
+  "default-src 'self' 'unsafe-inline'; img-src 'self' data: https:; " +
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+  "font-src 'self' data: https://fonts.gstatic.com";
 
 const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',

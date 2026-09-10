@@ -6,16 +6,51 @@ import { downloadUrl, previewUrl } from '../api';
 import { formatBytes } from '../format';
 import { CodeViewer } from './CodeViewer';
 import { ConsoleTab } from './ConsoleTab';
+import type { ConsoleCounts } from './ConsoleTab';
 import { InspectToggle, VisualEditorPanel, useInspectMode } from './VisualEditorPanel';
 import { Logo } from './Logo';
 
 type Tab = 'preview' | 'code' | 'console';
 type Device = 'mobile' | 'tablet' | 'desktop';
 
+const TAB_ICONS: Record<Tab, ReactElement> = {
+  preview: (
+    <svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" className="tab-icon">
+      <rect x="1.5" y="2" width="10" height="9" rx="1.2" stroke="currentColor" strokeWidth="1.1" fill="none" />
+      <path d="M1.5 4.4h10" stroke="currentColor" strokeWidth="1.1" />
+    </svg>
+  ),
+  code: (
+    <svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" className="tab-icon">
+      <path
+        d="M4.4 4.1 1.9 6.5l2.5 2.4M8.6 4.1l2.5 2.4-2.5 2.4"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
+  console: (
+    <svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" className="tab-icon">
+      <rect x="1.5" y="2" width="10" height="9" rx="1.2" stroke="currentColor" strokeWidth="1.1" fill="none" />
+      <path
+        d="M3.6 4.9 5.4 6.5 3.6 8.1M6.3 8.3h2.6"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
+};
+
 const DEVICES: { id: Device; hint: string; icon: ReactElement }[] = [
   {
     id: 'mobile',
-    hint: 'Mobile — 390px',
+    hint: 'Mobile - 390px',
     icon: (
       <svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true">
         <rect x="3.75" y="1.5" width="5.5" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.1" fill="none" />
@@ -25,7 +60,7 @@ const DEVICES: { id: Device; hint: string; icon: ReactElement }[] = [
   },
   {
     id: 'tablet',
-    hint: 'Tablet — 768px',
+    hint: 'Tablet - 768px',
     icon: (
       <svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true">
         <rect x="2.25" y="1.75" width="8.5" height="9.5" rx="1.2" stroke="currentColor" strokeWidth="1.1" fill="none" />
@@ -35,7 +70,7 @@ const DEVICES: { id: Device; hint: string; icon: ReactElement }[] = [
   },
   {
     id: 'desktop',
-    hint: 'Desktop — full width',
+    hint: 'Desktop - full width',
     icon: (
       <svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true">
         <rect x="1.5" y="2" width="10" height="7" rx="1" stroke="currentColor" strokeWidth="1.1" fill="none" />
@@ -57,15 +92,18 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
   const [reloadKey, setReloadKey] = useState(0);
   const [frameLoaded, setFrameLoaded] = useState(false);
   const [cardDismissed, setCardDismissed] = useState(false);
-  const [consoleCount, setConsoleCount] = useState(0);
+  const [consoleCounts, setConsoleCounts] = useState<ConsoleCounts>({ total: 0, errors: 0, warnings: 0 });
   const previewTabRef = useRef<HTMLButtonElement>(null);
   const codeTabRef = useRef<HTMLButtonElement>(null);
   const consoleTabRef = useRef<HTMLButtonElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const doneOpenRef = useRef<HTMLButtonElement>(null);
   const inspect = useInspectMode(iframeRef);
   const buildId = build?.id;
   const phase = build?.phase;
   const prevPhaseRef = useRef<Phase | undefined>(phase);
+  const canPreview = build !== null && (build.files.length > 0 || build.siteUrl !== undefined);
+  const doneCardVisible = phase === 'DONE' && !cardDismissed && canPreview;
 
   useEffect(() => {
     setFrameLoaded(false);
@@ -81,6 +119,16 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
     }
   }, [phase]);
 
+  useEffect(() => {
+    if (!doneCardVisible) return;
+    doneOpenRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCardDismissed(true);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [doneCardVisible]);
+
   function onTabKeyDown(e: React.KeyboardEvent) {
     if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
     e.preventDefault();
@@ -95,7 +143,8 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
     return (
       <div className="workspace">
         <div className="empty-state">
-          <p>Loading build…</p>
+          <span className="empty-spinner" aria-hidden="true" />
+          <p>Loading build...</p>
         </div>
       </div>
     );
@@ -118,8 +167,8 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
 
   const running = isRunning(build.phase);
   const url = previewUrl(build.id, build.siteUrl);
-  const canPreview = build.files.length > 0 || build.siteUrl !== undefined;
   const totalBytes = build.files.reduce((sum, f) => sum + (f.bytes ?? 0), 0);
+  const consoleAlerts = consoleCounts.errors + consoleCounts.warnings;
 
   return (
     <div className="workspace">
@@ -136,6 +185,7 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
             className="tab"
             onClick={() => setTab('preview')}
           >
+            {TAB_ICONS.preview}
             Preview
           </button>
           <button
@@ -149,6 +199,7 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
             className="tab"
             onClick={() => setTab('code')}
           >
+            {TAB_ICONS.code}
             Code
             {build.files.length > 0 && <span className="tab-count">{build.files.length}</span>}
           </button>
@@ -163,8 +214,16 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
             className="tab"
             onClick={() => setTab('console')}
           >
+            {TAB_ICONS.console}
             Console
-            {consoleCount > 0 && <span className="tab-count">{consoleCount}</span>}
+            {consoleAlerts > 0 && (
+              <span
+                className={`tab-count ${consoleCounts.errors > 0 ? 'tab-count--err' : 'tab-count--warn'}`}
+                aria-label={`${consoleAlerts} console errors or warnings`}
+              >
+                {consoleAlerts}
+              </span>
+            )}
           </button>
         </div>
 
@@ -175,6 +234,16 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
             aria-disabled={build.files.length === 0}
             onClick={build.files.length === 0 ? (e) => e.preventDefault() : undefined}
           >
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" className="btn-icon">
+              <path
+                d="M6 1.5v6M3.6 5.3 6 7.7l2.4-2.4M2 9.6v0.9h8v-0.9"
+                stroke="currentColor"
+                strokeWidth="1.2"
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
             Download .zip
           </a>
           <button type="button" className="btn btn--ghost btn--s" onClick={onNewBuild}>
@@ -190,34 +259,16 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
         hidden={tab !== 'preview'}
         className="tabpanel"
       >
-        <div className="preview-toolbar">
-          <div className="seg" role="group" aria-label="Preview width">
-            {DEVICES.map((d) => (
-              <button
-                key={d.id}
-                type="button"
-                className="seg-btn"
-                aria-pressed={device === d.id}
-                aria-label={d.hint}
-                title={d.hint}
-                onClick={() => setDevice(d.id)}
-              >
-                {d.icon}
-              </button>
-            ))}
-          </div>
-          {canPreview && (
-            <div className="seg" role="group" aria-label="Preview tools">
-              <InspectToggle active={inspect.active} onToggle={inspect.toggle} />
-            </div>
-          )}
-        </div>
-
         {canPreview ? (
           <div className={`preview-stage w--${device}`}>
-            {!frameLoaded && <div className="preview-loading muted">Loading preview…</div>}
+            {!frameLoaded && <div className="preview-loading muted">Loading preview...</div>}
             <div className="preview-browser">
               <div className="preview-chrome">
+                <span className="chrome-dots" aria-hidden="true">
+                  <span className="chrome-dot" />
+                  <span className="chrome-dot" />
+                  <span className="chrome-dot" />
+                </span>
                 <button
                   type="button"
                   className="icon-btn"
@@ -238,24 +289,6 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
                     />
                   </svg>
                 </button>
-                <a
-                  className="icon-btn"
-                  href={url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title="Open preview in a new tab"
-                  aria-label="Open preview in a new tab"
-                >
-                  <svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true">
-                    <path
-                      d="M5 2H2.5v9H11V8M7.5 2H11v3.5M11 2 6 7"
-                      stroke="currentColor"
-                      strokeWidth="1.2"
-                      fill="none"
-                      strokeLinecap="round"
-                    />
-                  </svg>
-                </a>
                 <span className="preview-url" title={url}>
                   <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true" className="url-lock">
                     <rect x="2.75" y="5" width="6.5" height="5.5" rx="1" stroke="currentColor" strokeWidth="1.1" fill="none" />
@@ -269,6 +302,42 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
                   </svg>
                   <span className="url-text">{url}</span>
                 </span>
+                <div className="chrome-tools">
+                  <div className="seg seg--chrome" role="group" aria-label="Preview width">
+                    {DEVICES.map((d) => (
+                      <button
+                        key={d.id}
+                        type="button"
+                        className="seg-btn"
+                        aria-pressed={device === d.id}
+                        aria-label={d.hint}
+                        title={d.hint}
+                        onClick={() => setDevice(d.id)}
+                      >
+                        {d.icon}
+                      </button>
+                    ))}
+                  </div>
+                  <InspectToggle active={inspect.active} onToggle={inspect.toggle} />
+                  <a
+                    className="icon-btn"
+                    href={url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="Open preview in a new tab"
+                    aria-label="Open preview in a new tab"
+                  >
+                    <svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true">
+                      <path
+                        d="M5 2H2.5v9H11V8M7.5 2H11v3.5M11 2 6 7"
+                        stroke="currentColor"
+                        strokeWidth="1.2"
+                        fill="none"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </a>
+                </div>
               </div>
               <iframe
                 key={`${build.id}-${reloadKey}`}
@@ -294,9 +363,20 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
               }}
             />
 
-            {build.phase === 'DONE' && !cardDismissed && (
+            {doneCardVisible && (
               <div className="done-overlay">
                 <div className="done-card" role="group" aria-label="Build summary">
+                  <button
+                    type="button"
+                    className="icon-btn done-close"
+                    aria-label="Dismiss build summary"
+                    title="Dismiss (Esc)"
+                    onClick={() => setCardDismissed(true)}
+                  >
+                    <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true">
+                      <path d="M2 2l7 7M9 2l-7 7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                    </svg>
+                  </button>
                   <span className="done-kicker">
                     <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
                       <circle cx="7" cy="7" r="6" stroke="currentColor" strokeWidth="1.3" fill="none" />
@@ -326,6 +406,7 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
                     <button
                       type="button"
                       className="btn btn--primary done-open"
+                      ref={doneOpenRef}
                       onClick={() => setCardDismissed(true)}
                     >
                       Open Preview
@@ -344,12 +425,26 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
             )}
           </div>
         ) : (
-          <div className="empty-state">
+          <div className="empty-state empty-hint">
+            <svg className="empty-icon" width="36" height="36" viewBox="0 0 36 36" aria-hidden="true">
+              <rect x="4" y="7" width="28" height="22" rx="2.5" stroke="currentColor" strokeWidth="1.4" fill="none" />
+              <path d="M4 12.5h28" stroke="currentColor" strokeWidth="1.4" />
+              <circle cx="8" cy="9.8" r="0.9" fill="currentColor" />
+              <circle cx="11.5" cy="9.8" r="0.9" fill="currentColor" />
+              <path
+                d="M10 20h10M10 24h7"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinecap="round"
+                opacity="0.55"
+              />
+            </svg>
             <p>
               {running
                 ? 'The preview appears as soon as the team writes the first files.'
                 : 'This build produced no files to preview.'}
             </p>
+            {running && <p className="empty-sub">Progress streams in the chat while the team works.</p>}
           </div>
         )}
       </div>
@@ -371,7 +466,7 @@ export function Workspace({ build, loading, onNewBuild }: WorkspaceProps) {
         hidden={tab !== 'console'}
         className="tabpanel"
       >
-        <ConsoleTab buildId={build.id} onCountChange={setConsoleCount} />
+        <ConsoleTab buildId={build.id} onCountChange={setConsoleCounts} />
       </div>
     </div>
   );

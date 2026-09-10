@@ -68,10 +68,9 @@ describe('premium mock build (real orchestrator, real mock provider, real store)
     expect(state?.files.map((f) => f.path).sort()).toEqual([...PREMIUM_FILES].sort());
 
     // The reviewer acknowledged the recipe with 0-1 issues; here one real
-    // finding went back and the fix pass rewrote index.html.
-    expect(state?.issues?.length).toBeLessThanOrEqual(1);
-    expect(state?.issues?.[0]?.severity).toBe('warn');
-    expect(state?.issues?.[0]?.file).toBe('index.html');
+    // finding went back and the fix pass rewrote index.html. Findings are
+    // cleared on completion (resolved issues are not open at DONE).
+    expect(state?.issues).toBeUndefined();
 
     // All five files really landed in the confined store on disk.
     const diskEntries = await listSiteFiles(w.sitesRoot, id);

@@ -218,6 +218,10 @@ export function normalizeEvent(raw: unknown): BuildEvent | null {
       const siteUrl = str(e.siteUrl) ?? str(e.url);
       return siteUrl ? { type: 'done', siteUrl } : { type: 'done' };
     }
+    case 'restored': {
+      const checkpoint = typeof e.checkpoint === 'number' ? e.checkpoint : undefined;
+      return { type: 'restored', ...(checkpoint !== undefined ? { checkpoint } : {}) };
+    }
     case 'error': {
       return { type: 'error', error: str(e.error) ?? str(e.message) ?? 'Build failed.' };
     }
@@ -429,7 +433,7 @@ export interface StreamHandle {
   retry(): void;
 }
 
-const EVENT_TYPES = ['phase', 'message', 'question', 'plan', 'file', 'activity', 'review', 'done', 'error'] as const;
+const EVENT_TYPES = ['phase', 'message', 'question', 'plan', 'file', 'activity', 'review', 'done', 'restored', 'error'] as const;
 
 export function openBuildEvents(
   id: string,
@@ -450,17 +454,28 @@ export function openBuildEvents(
     } catch {
       return;
     }
-    const ev = normalizeEvent(parsed);
-    if (!ev) return;
-    if (ev.type === 'done' || ev.type === 'error') terminal = true;
-    onEvent(ev);
-    if (terminal) {
-      // The build reached a terminal event; the server will close the
-      // socket — close on our side so we do not reconnect pointlessly.
-      closed = true;
-      es?.close();
-      es = null;
-      onStatus('idle');
+    // The hub coalesces same-type bursts into {type:'batch',events:[...]};
+    // unwrap before normalizing or every coalesced event is silently lost.
+    const frames: unknown[] =
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      (parsed as { type?: unknown }).type === 'batch' &&
+      Array.isArray((parsed as { events?: unknown }).events)
+        ? (parsed as { events: unknown[] }).events
+        : [parsed];
+    for (const frame of frames) {
+      const ev = normalizeEvent(frame);
+      if (!ev) continue;
+      if (ev.type === 'done' || ev.type === 'error') terminal = true;
+      onEvent(ev);
+      if (terminal) {
+        // The build reached a terminal event; the server will close the
+        // socket — close on our side so we do not reconnect pointlessly.
+        closed = true;
+        es?.close();
+        es = null;
+        onStatus('idle');
+      }
     }
   }
 

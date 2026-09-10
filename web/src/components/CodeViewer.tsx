@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { SiteFile } from '../types';
 import { baseName, folderOf, formatBytes } from '../format';
-import { highlightLines, langFor } from '../highlight';
+import { TOKEN_FALLBACKS, highlightLines, langFor } from '../highlight';
+import { ExternalIcon, FileCodeIcon, FileCssIcon, FileHtmlIcon, FileJsIcon, FileMdIcon, FolderIcon } from './icons';
 
 /** Render at most ~this many lines around the viewport; the rest is spacers. */
 const WINDOW_MAX = 2000;
@@ -11,6 +12,61 @@ const FALLBACK_LINE_H = 19.2;
 const FALLBACK_VIEWPORT_H = 600;
 /** Keep tab memory for the most recent builds only. */
 const MEMORY_LIMIT = 50;
+
+/* Editor chrome tokens: var() hooks so styles.css owns the final values; the
+ * fallbacks form a complete, contrast-checked palette on their own. */
+const EDITOR_BG = 'var(--editor-bg, #090c11)';
+const EDITOR_LN = 'var(--editor-ln, #74808f)';
+const EDITOR_LN_CURRENT = 'var(--editor-ln-current, #c8d3e0)';
+const EDITOR_CURRENT_LINE = 'var(--editor-current-line, rgba(140, 170, 255, 0.08))';
+const EDITOR_HIT = 'var(--editor-hit, rgba(255, 203, 107, 0.14))';
+
+type FileKind = 'html' | 'css' | 'js' | 'json' | 'image' | 'doc' | 'file';
+
+function fileKind(path: string): FileKind {
+  const dot = path.lastIndexOf('.');
+  const ext = dot < 0 ? '' : path.slice(dot + 1).toLowerCase();
+  if (ext === 'html' || ext === 'htm') return 'html';
+  if (ext === 'css') return 'css';
+  if (ext === 'js' || ext === 'mjs' || ext === 'cjs' || ext === 'jsx' || ext === 'ts' || ext === 'tsx') return 'js';
+  if (ext === 'json' || ext === 'map') return 'json';
+  if (ext === 'png' || ext === 'jpg' || ext === 'jpeg' || ext === 'gif' || ext === 'webp' || ext === 'svg' || ext === 'ico' || ext === 'avif')
+    return 'image';
+  if (ext === 'md' || ext === 'markdown' || ext === 'txt') return 'doc';
+  return 'file';
+}
+
+/** Per-kind icon accents; --ft-* variables let styles.css re-theme. */
+const FILE_KIND_COLORS: Record<FileKind, string> = {
+  html: 'var(--ft-html, #ff7a45)',
+  css: 'var(--ft-css, #6cb6ff)',
+  js: 'var(--ft-js, #f0d75c)',
+  json: 'var(--ft-json, #a3d9a5)',
+  image: 'var(--ft-image, #c792ea)',
+  doc: 'var(--ft-doc, #8fa3bf)',
+  file: 'var(--ft-file, #6b7684)',
+};
+
+/** Local glyphs only for the kinds the shared icon set doesn't cover. */
+const LOCAL_KIND_PATHS: Partial<Record<FileKind, string>> = {
+  image: 'M1.8 2.6h8.4v6.8H1.8zM2.6 8.2 4.4 6l1.5 1.7 1.3-1.4 2.2 1.9M4.1 4.2h.01',
+  file: 'M3.4 1.9h3.4l2 2v6.2H3.4zM6.8 1.9v2h2',
+};
+
+function FileTypeIcon({ kind, className }: { kind: FileKind; className?: string }) {
+  const style: CSSProperties = { flex: '0 0 auto', color: FILE_KIND_COLORS[kind] };
+  const local = LOCAL_KIND_PATHS[kind];
+  if (local) {
+    return (
+      <svg className={className} width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false" style={style}>
+        <path d={local} stroke="currentColor" strokeWidth="1" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  const Glyph =
+    kind === 'html' ? FileHtmlIcon : kind === 'css' ? FileCssIcon : kind === 'js' ? FileJsIcon : kind === 'doc' ? FileMdIcon : FileCodeIcon;
+  return <Glyph size={12} strokeWidth={2} className={className} style={style} />;
+}
 
 interface FileGroup {
   folder: string;
@@ -109,9 +165,10 @@ function tabWrapStyle(active: boolean): CSSProperties {
     alignItems: 'center',
     flex: '0 0 auto',
     border: `1px solid ${active ? 'var(--border-0)' : 'transparent'}`,
-    borderBottom: active ? '1px solid var(--bg-0)' : '1px solid transparent',
+    borderBottom: active ? `1px solid ${EDITOR_BG}` : '1px solid transparent',
     borderRadius: 'var(--radius-m) var(--radius-m) 0 0',
-    background: active ? 'var(--bg-0)' : 'transparent',
+    background: active ? EDITOR_BG : 'transparent',
+    boxShadow: active ? 'inset 0 2px 0 var(--accent, #ff7a45)' : 'none',
     color: active ? 'var(--text-0)' : 'var(--text-2)',
   };
 }
@@ -126,6 +183,9 @@ const tabButtonStyle: CSSProperties = {
   padding: '3px 2px 3px 10px',
   cursor: 'pointer',
   whiteSpace: 'nowrap',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
 };
 
 const tabCloseStyle: CSSProperties = {
@@ -137,6 +197,36 @@ const tabCloseStyle: CSSProperties = {
   lineHeight: 1,
   padding: '2px 8px 2px 6px',
   cursor: 'pointer',
+};
+
+/** Dirty-dot slot: rendered in every tab, revealed via [data-dirty="true"]
+ *  when a future editing flow can mark unsaved changes. Read-only today. */
+const tabDirtyStyle: CSSProperties = {
+  flex: '0 0 auto',
+  width: 6,
+  height: 6,
+  borderRadius: '50%',
+  background: 'var(--accent, #ff7a45)',
+  visibility: 'hidden',
+};
+
+/** Gutter cell: sticky so line numbers survive horizontal scroll, tabular
+ *  digits so columns align, opaque bg so code doesn't show through. */
+const lineNoStyle: CSSProperties = {
+  position: 'sticky',
+  left: 0,
+  zIndex: 1,
+  background: EDITOR_BG,
+  boxShadow: '1px 0 0 var(--editor-gutter-border, rgba(255, 255, 255, 0.05))',
+  color: EDITOR_LN,
+  opacity: 1,
+  fontVariantNumeric: 'tabular-nums',
+};
+
+const lineNoCurrentStyle: CSSProperties = {
+  ...lineNoStyle,
+  color: EDITOR_LN_CURRENT,
+  fontWeight: 600,
 };
 
 const searchBarStyle: CSSProperties = {
@@ -174,6 +264,15 @@ const menuItemStyle: CSSProperties = {
   cursor: 'pointer',
 };
 
+const treeOpenStyle: CSSProperties = {
+  position: 'absolute',
+  right: 8,
+  top: '50%',
+  transform: 'translateY(-50%)',
+  display: 'inline-flex',
+  pointerEvents: 'none',
+};
+
 interface CodeViewerProps {
   files: SiteFile[];
   running: boolean;
@@ -194,6 +293,10 @@ export function CodeViewer({ files, running, buildId }: CodeViewerProps) {
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(FALLBACK_VIEWPORT_H);
   const [lineH, setLineH] = useState(FALLBACK_LINE_H);
+  /** Current-line hint (line index), set by clicking a code line. */
+  const [cursorLine, setCursorLine] = useState<number | null>(null);
+  /** Tree row under pointer/focus - reveals the 'open' affordance. */
+  const [hoverFile, setHoverFile] = useState<string | null>(null);
   const scrollRef = useRef<HTMLPreElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const rafRef = useRef<number | null>(null);
@@ -293,9 +396,10 @@ export function CodeViewer({ files, running, buildId }: CodeViewerProps) {
     return () => ro.disconnect();
   }, [active, file?.content]);
 
-  // New file: jump back to the top.
+  // New file: jump back to the top and drop the current-line hint.
   useEffect(() => {
     setScrollTop(0);
+    setCursorLine(null);
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   }, [active]);
 
@@ -399,6 +503,17 @@ export function CodeViewer({ files, running, buildId }: CodeViewerProps) {
     if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
       e.preventDefault();
       openSearch();
+      return;
+    }
+    if (e.key === 'Escape' && cursorLine !== null) setCursorLine(null);
+  }
+
+  function onCodeClick(e: React.MouseEvent) {
+    const row = (e.target as HTMLElement).closest('[data-line]');
+    if (row && scrollRef.current?.contains(row)) {
+      setCursorLine(Number(row.getAttribute('data-line')));
+    } else {
+      setCursorLine(null);
     }
   }
 
@@ -435,20 +550,22 @@ export function CodeViewer({ files, running, buildId }: CodeViewerProps) {
       const lineIdx = filtering ? matches[k] : k;
       const line = highlighted[lineIdx] ?? [];
       const isHit = filtering && k === hit;
+      const isCursor = cursorLine === lineIdx;
       rows.push(
         <span
-          className="code-line"
+          className={`code-line${isCursor ? ' is-current' : ''}`}
           key={lineIdx}
+          data-line={lineIdx}
           data-hit={isHit ? 'current' : undefined}
-          style={isHit ? { background: 'var(--bg-3)' } : undefined}
+          style={isHit ? { background: EDITOR_HIT } : isCursor ? { background: EDITOR_CURRENT_LINE } : undefined}
         >
-          <span className="ln" aria-hidden="true">
+          <span className="ln" aria-hidden="true" style={isCursor ? lineNoCurrentStyle : lineNoStyle}>
             {lineIdx + 1}
           </span>
           <span className="lc">
             {line.map((t, i) =>
               t.cls ? (
-                <span key={i} className={t.cls}>
+                <span key={i} className={t.cls} style={{ color: `var(--${t.cls}, ${TOKEN_FALLBACKS[t.cls]})` }}>
                   {t.text}
                 </span>
               ) : (
@@ -469,25 +586,48 @@ export function CodeViewer({ files, running, buildId }: CodeViewerProps) {
           <div className="tree-group" key={g.folder || '(root)'}>
             {g.folder && (
               <div className="tree-folder" title={g.folder}>
-                {g.folder}/
+                <FolderIcon
+                  size={12}
+                  strokeWidth={2}
+                  style={{ flex: '0 0 auto', marginRight: 5, verticalAlign: '-2px', color: 'var(--ft-folder, #8fa3bf)' }}
+                />
+                <span className="tree-folder-name">{g.folder}/</span>
               </div>
             )}
             <ul>
-              {g.files.map((f) => (
-                <li key={f.path}>
-                  <button
-                    type="button"
-                    className={`tree-file${f.path === active ? ' is-selected' : ''}`}
-                    onClick={() => activateFile(f.path)}
-                    onContextMenu={(e) => openContextMenu(e, f.path)}
-                    aria-current={f.path === active ? 'true' : undefined}
-                    title={f.path}
-                  >
-                    <span className="tree-file-name">{baseName(f.path)}</span>
-                    <span className="tree-file-bytes">{formatBytes(f.bytes)}</span>
-                  </button>
-                </li>
-              ))}
+              {g.files.map((f) => {
+                const hovered = hoverFile === f.path;
+                return (
+                  <li key={f.path}>
+                    <button
+                      type="button"
+                      className={`tree-file${f.path === active ? ' is-selected' : ''}`}
+                      style={{ position: 'relative' }}
+                      onClick={() => activateFile(f.path)}
+                      onContextMenu={(e) => openContextMenu(e, f.path)}
+                      onMouseEnter={() => setHoverFile(f.path)}
+                      onMouseLeave={() => setHoverFile((h) => (h === f.path ? null : h))}
+                      onFocus={() => setHoverFile(f.path)}
+                      onBlur={() => setHoverFile((h) => (h === f.path ? null : h))}
+                      aria-current={f.path === active ? 'true' : undefined}
+                      title={f.path}
+                    >
+                      <FileTypeIcon kind={fileKind(f.path)} className="tree-file-icon" />
+                      <span className="tree-file-name" style={{ flex: '1 1 auto', minWidth: 0 }}>
+                        {baseName(f.path)}
+                      </span>
+                      <span className="tree-file-bytes" style={{ visibility: hovered ? 'hidden' : 'visible' }}>
+                        {formatBytes(f.bytes)}
+                      </span>
+                      {hovered && (
+                        <span className="tree-file-open" style={treeOpenStyle} aria-hidden="true">
+                          <ExternalIcon size={11} strokeWidth={2} style={{ display: 'block', color: 'var(--accent, #ff7a45)' }} />
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         ))}
@@ -495,14 +635,20 @@ export function CodeViewer({ files, running, buildId }: CodeViewerProps) {
 
       <div className="code-view" onKeyDown={onCodeKeyDown}>
         {openTabs.length > 0 && (
-          <div style={tabStripStyle} role="tablist" aria-label="Open files">
+          <div className="code-tabs" style={tabStripStyle} role="tablist" aria-label="Open files">
             {openTabs.map((p) => {
               const name = baseName(p);
               const isActive = p === active;
               return (
-                <div key={p} style={tabWrapStyle(isActive)} onContextMenu={(e) => openContextMenu(e, p)}>
+                <div
+                  key={p}
+                  className={`code-tab${isActive ? ' is-active' : ''}`}
+                  style={tabWrapStyle(isActive)}
+                  onContextMenu={(e) => openContextMenu(e, p)}
+                >
                   <button
                     type="button"
+                    className="code-tab-btn"
                     role="tab"
                     aria-selected={isActive}
                     title={p}
@@ -512,10 +658,13 @@ export function CodeViewer({ files, running, buildId }: CodeViewerProps) {
                       if (e.button === 1) closeTab(p);
                     }}
                   >
+                    <FileTypeIcon kind={fileKind(p)} className="code-tab-icon" />
                     {name}
+                    <span className="code-tab-dirty" style={tabDirtyStyle} data-dirty="false" aria-hidden="true" />
                   </button>
                   <button
                     type="button"
+                    className="code-tab-close"
                     style={tabCloseStyle}
                     aria-label={`Close ${name}`}
                     title="Close"
@@ -532,6 +681,7 @@ export function CodeViewer({ files, running, buildId }: CodeViewerProps) {
         {file ? (
           <>
             <div className="code-head">
+              <FileTypeIcon kind={fileKind(file.path)} className="code-head-icon" />
               <span className="code-path" title={file.path}>
                 {file.path}
               </span>
@@ -563,7 +713,7 @@ export function CodeViewer({ files, running, buildId }: CodeViewerProps) {
             </div>
 
             {searchOpen && (
-              <div style={searchBarStyle} role="search">
+              <div className="code-search" style={searchBarStyle} role="search">
                 <input
                   ref={inputRef}
                   className="input"
@@ -646,6 +796,8 @@ export function CodeViewer({ files, running, buildId }: CodeViewerProps) {
                 aria-label={`Contents of ${file.path}`}
                 ref={scrollRef}
                 onScroll={onScroll}
+                onClick={onCodeClick}
+                style={{ background: EDITOR_BG }}
               >
                 <code>
                   {win.start > 0 && <span style={{ display: 'block', height: win.start * lineH }} aria-hidden="true" />}
@@ -655,7 +807,7 @@ export function CodeViewer({ files, running, buildId }: CodeViewerProps) {
                   )}
                   {filtering && matches.length === 0 && (
                     <span className="code-line">
-                      <span className="ln" aria-hidden="true" />
+                      <span className="ln" aria-hidden="true" style={lineNoStyle} />
                       <span className="lc muted">No lines match — clear the filter to see the whole file.</span>
                     </span>
                   )}
@@ -671,6 +823,7 @@ export function CodeViewer({ files, running, buildId }: CodeViewerProps) {
 
         {menu && (
           <div
+            className="code-menu"
             role="menu"
             aria-label={`Actions for ${menu.path}`}
             style={{
@@ -679,7 +832,7 @@ export function CodeViewer({ files, running, buildId }: CodeViewerProps) {
               top: Math.min(menu.y, window.innerHeight - 60),
             }}
           >
-            <button type="button" role="menuitem" style={menuItemStyle} onClick={() => copyPath(menu.path)}>
+            <button type="button" className="code-menu-item" role="menuitem" style={menuItemStyle} onClick={() => copyPath(menu.path)}>
               Copy path
             </button>
           </div>

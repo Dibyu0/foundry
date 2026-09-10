@@ -169,4 +169,5 @@ export type BuildEvent =
   | { type: 'activity'; activity: ActivityEvent }
   | { type: 'review'; issues: ReviewIssue[] }
   | { type: 'done'; siteUrl?: string }
+  | { type: 'restored'; checkpoint?: number }
   | { type: 'error'; error: string };

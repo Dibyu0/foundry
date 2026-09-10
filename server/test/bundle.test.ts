@@ -115,6 +115,149 @@ describe('bundleSite', () => {
     expect(scriptAt).toBeLessThan(bodyCloseAt);
   });
 
+  it('inserts deferred scripts before the real </body>, not a literal inside inlined script content', () => {
+    const files = new Map<string, string>([
+      [
+        'index.html',
+        '<!doctype html><head><script src="early.js"></script><script src="late.js" defer></script></head><body><p>x</p></body>',
+      ],
+      ['early.js', 'const tag = "</body>";'],
+      ['late.js', 'console.log("late");'],
+    ]);
+    const { html, inlined } = bundleSite(files);
+    expect(inlined).toEqual(['early.js', 'late.js']);
+    const fakeAt = html.indexOf('"</body>"');
+    const realBodyAt = html.lastIndexOf('</body>');
+    const lateAt = html.indexOf('data-inlined-from="late.js"');
+    expect(fakeAt).toBeGreaterThan(-1);
+    expect(realBodyAt).toBeGreaterThan(fakeAt);
+    // The deferred block must land after the fake literal and just before
+    // the document's own body close; inserting at the fake one would put
+    // script markup inside a JS string and break the export.
+    expect(lateAt).toBeGreaterThan(fakeAt);
+    expect(lateAt).toBeLessThan(realBodyAt);
+  });
+
+  it('rewrites url()s in subdirectory stylesheets to stay root-relative once inlined', () => {
+    const files = new Map<string, string>([
+      ['index.html', '<!doctype html><head><link rel="stylesheet" href="css/main.css"></head><body></body>'],
+      [
+        'css/main.css',
+        [
+          '.a { background: url(bg.png); }',
+          '.b { background: url("../img/hero.png?v=2"); }',
+          ".c { background: url('fonts/a.woff2'); }",
+          '.d { background: url(#gradient); }',
+          '.e { background: url(data:image/png;base64,AA); }',
+          '.f { background: url(https://cdn.example.com/x.png); }',
+          '.g { background: url(/already-root.png); }',
+        ].join('\n'),
+      ],
+      ['css/bg.png', 'png'],
+      ['img/hero.png', 'png'],
+      ['css/fonts/a.woff2', 'font'],
+    ]);
+    const { html, inlined, skipped } = bundleSite(files);
+    expect(inlined).toEqual(['css/main.css']);
+    // Relative urls are rewritten against the stylesheet's directory.
+    expect(html).toContain('url(css/bg.png)');
+    expect(html).toContain('url("img/hero.png?v=2")');
+    expect(html).toContain("url('css/fonts/a.woff2')");
+    // Fragments, data:, external, and root-absolute urls stay verbatim.
+    expect(html).toContain('url(#gradient)');
+    expect(html).toContain('url(data:image/png;base64,AA)');
+    expect(html).toContain('url(https://cdn.example.com/x.png)');
+    expect(html).toContain('url(/already-root.png)');
+    // The report names the resolved paths, matching what the html now says.
+    expect(skipped.find((s) => s.path === 'css/bg.png')?.reason).toContain('inlined CSS');
+    expect(skipped.find((s) => s.path === 'img/hero.png')?.reason).toContain('inlined CSS');
+    expect(skipped.find((s) => s.path === 'bg.png')).toBeUndefined();
+    const external = skipped.find((s) => s.path === 'https://cdn.example.com/x.png');
+    expect(external?.reason).toContain('external asset');
+  });
+
+  it('does not inline module or other non-classic scripts, and says so honestly', () => {
+    const files = new Map<string, string>([
+      [
+        'index.html',
+        [
+          '<!doctype html><head>',
+          '<script type="module" src="app.mjs"></script>',
+          '<script type="importmap" src="map.json"></script>',
+          '<script type="text/javascript" src="classic.js"></script>',
+          '</head><body></body>',
+        ].join(''),
+      ],
+      ['app.mjs', 'import { x } from "./dep.js"; export const y = x;'],
+      ['map.json', '{"imports":{}}'],
+      ['classic.js', 'var ok = 1;'],
+      ['dep.js', 'export const x = 1;'],
+    ]);
+    const { html, inlined, skipped } = bundleSite(files);
+    // The classic script still inlines; the module and importmap keep their
+    // tags untouched (inlining them as classic scripts would be a
+    // SyntaxError or would run content the page never executes).
+    expect(inlined).toEqual(['classic.js']);
+    expect(html).toContain('<script type="module" src="app.mjs"></script>');
+    expect(html).toContain('<script type="importmap" src="map.json"></script>');
+    expect(html).not.toContain('data-inlined-from="app.mjs"');
+    const mod = skipped.find((s) => s.path === 'app.mjs');
+    expect(mod?.reason).toContain('"module"');
+    expect(mod?.reason).toContain('not a classic script');
+    expect(skipped.find((s) => s.path === 'map.json')?.reason).toContain('not a classic script');
+  });
+
+  it('leaves alternate stylesheets linked instead of forcing them on', () => {
+    const files = new Map<string, string>([
+      [
+        'index.html',
+        '<!doctype html><head><link rel="stylesheet" href="main.css"><link rel="alternate stylesheet" href="alt.css"></head><body></body>',
+      ],
+      ['main.css', 'body { color: #111; }'],
+      ['alt.css', 'body { display: none; }'],
+    ]);
+    const { html, inlined, skipped } = bundleSite(files);
+    expect(inlined).toEqual(['main.css']);
+    expect(html).toContain('<link rel="alternate stylesheet" href="alt.css">');
+    expect(html).not.toContain('display: none');
+    const alt = skipped.find((s) => s.path === 'alt.css');
+    expect(alt?.reason).toContain('alternate stylesheet');
+    expect(alt?.reason).toContain('left linked');
+  });
+
+  it('leaves titled and disabled stylesheets linked instead of forcing them on', () => {
+    const files = new Map<string, string>([
+      [
+        'index.html',
+        '<!doctype html><head><link rel="stylesheet" href="theme.css" title="Dark"><link rel="stylesheet" href="off.css" disabled></head><body></body>',
+      ],
+      ['theme.css', 'body { background: #000; }'],
+      ['off.css', 'body { background: #fff; }'],
+    ]);
+    const { html, inlined, skipped } = bundleSite(files);
+    expect(inlined).toEqual([]);
+    expect(html).toContain('href="theme.css"');
+    expect(html).toContain('href="off.css"');
+    expect(skipped.find((s) => s.path === 'theme.css')?.reason).toContain('titled stylesheet');
+    expect(skipped.find((s) => s.path === 'off.css')?.reason).toContain('disabled stylesheet');
+  });
+
+  it('carries media onto the style tag so a print sheet stays print-only', () => {
+    const files = new Map<string, string>([
+      [
+        'index.html',
+        '<!doctype html><head><link rel="stylesheet" href="screen.css"><link rel="stylesheet" href="print.css" media="print"></head><body></body>',
+      ],
+      ['screen.css', 'body { color: #111; }'],
+      ['print.css', 'body { display: none; }'],
+    ]);
+    const { html, inlined } = bundleSite(files);
+    expect(inlined).toEqual(['screen.css', 'print.css']);
+    expect(html).toContain('<style data-inlined-from="screen.css">');
+    expect(html).toContain('<style data-inlined-from="print.css" media="print">');
+    expect(html).toContain('display: none');
+  });
+
   it('escapes closing script/style tags inside inlined content', () => {
     const files = new Map<string, string>([
       ['index.html', '<!doctype html><head><link rel="stylesheet" href="s.css"><script src="a.js"></script></head><body></body>'],

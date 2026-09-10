@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import type { ActivityEvent, Phase, ReviewIssue, RoleId, RoleState, SiteFile } from '../types';
 import { ROLE_IDS, ROLE_LABELS, asRoleId } from '../types';
 import { baseName, formatBytes } from '../format';
 import { highlightLines, langFor } from '../highlight';
+import { CheckIcon, CloseIcon, Icon, ICON_PATHS } from './icons';
+import type { IconName } from './icons';
 
 const ROLE_PHASE: Record<RoleId, Phase> = {
   planner: 'INTAKE',
@@ -65,7 +68,11 @@ function phaseHint(phase: Phase | undefined, role: RoleId): RoleState {
 /** Precise row state for a role. Activity events are the source of truth; a
  *  role with no event by the time a live build reaches a terminal phase was
  *  skipped. Builds loaded from history carry no activity, so a terminal
- *  phase falls back to the phase hint (DONE implies the pipeline ran). */
+ *  phase falls back to the phase hint (DONE implies the pipeline ran). One
+ *  exception to event truth: a cancelled or failed build never delivers the
+ *  role's done event, so a last-seen 'active' is stale and is demoted to
+ *  error instead of spinning forever. DONE keeps its special-casing - by
+ *  then every role that ran has its done event. */
 export function roleDisplay(
   role: string,
   activity: Record<string, ActivityEvent>,
@@ -75,6 +82,9 @@ export function roleDisplay(
   if (ev) {
     const s = ev.state;
     if (s === 'idle') return { state: 'queued' };
+    if (s === 'active' && (phase === 'CANCELLED' || phase === 'ERROR')) {
+      return { state: 'error', ...(ev.note !== undefined ? { note: ev.note } : {}) };
+    }
     return { state: s, ...(ev.note !== undefined ? { note: ev.note } : {}) };
   }
   if (!phase) return { state: 'queued' };
@@ -168,6 +178,74 @@ function writerLabel(role: string): string {
   return id ? ROLE_LABELS[id] : role;
 }
 
+/** Hex (#rrggbb) to rgba(); non-hex input (CSS var names) passes through. */
+function hexA(hex: string, alpha: number): string {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (m === null) return hex;
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
+/** Severity table order: errors first, infos last. Array.sort is stable, so
+ *  findings keep their arrival order within a severity. */
+const SEV_RANK: Record<ReviewIssue['severity'], number> = { error: 0, warn: 1, info: 2 };
+
+/** Path the active role is likely writing: an exact mention of a known file
+ *  wins, otherwise the first path-like token in the activity note. */
+function writingFileOf(note: string | undefined, files: SiteFile[]): string | null {
+  if (note === undefined) return null;
+  const lower = note.toLowerCase();
+  const hit = files.find((f) => {
+    const p = f.path.toLowerCase();
+    return lower.includes(p) || lower.includes(baseName(p));
+  });
+  if (hit) return hit.path;
+  const m = /[\w./-]+\.[a-z0-9]{1,5}/i.exec(note);
+  return m !== null ? m[0] : null;
+}
+
+/** Live prefers-reduced-motion flag. The global CSS rule collapses keyframe
+ *  animations on its own, but the SMIL spinner needs an explicit gate. */
+function useReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onChange = () => setReduced(mq.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+  return reduced;
+}
+
+/** Shared icon glyph per extension (BRAND's set); anything unmapped gets the
+ *  generic code-file glyph. Colors stay per-extension via EXT_ICON_COLORS. */
+function extIconName(ext: string): IconName {
+  switch (ext) {
+    case 'html':
+    case 'htm':
+    case 'svg':
+      return 'file-html';
+    case 'css':
+      return 'file-css';
+    case 'js':
+    case 'mjs':
+    case 'cjs':
+    case 'jsx':
+    case 'ts':
+    case 'tsx':
+    case 'json':
+      return 'file-js';
+    case 'md':
+    case 'markdown':
+    case 'txt':
+      return 'file-md';
+    default:
+      return 'file-code';
+  }
+}
+
 function FileIcon({ path }: { path: string }) {
   const base = baseName(path);
   const dot = base.lastIndexOf('.');
@@ -178,21 +256,102 @@ function FileIcon({ path }: { path: string }) {
       className="ff-icon"
       title={ext !== '' ? `.${ext}` : 'file'}
       aria-hidden="true"
-      style={{ display: 'inline-flex', flex: '0 0 auto', color }}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flex: '0 0 auto',
+        width: 18,
+        height: 18,
+        borderRadius: 4,
+        color,
+        background: 'color-mix(in srgb, currentColor 12%, transparent)',
+      }}
     >
-      <svg width="11" height="13" viewBox="0 0 12 14">
-        <path
-          d="M2.5 1h4.2L10 4.2V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1z"
-          stroke="currentColor"
-          strokeWidth="1.1"
-          fill="none"
-          strokeLinejoin="round"
-        />
-        <path d="M6.7 1v3.2H10" stroke="currentColor" strokeWidth="1.1" fill="none" strokeLinejoin="round" />
-      </svg>
+      <Icon name={extIconName(ext)} size={12} strokeWidth={1.8} />
     </span>
   );
 }
+
+/** Pipeline node icon per display state: a hollow ring while queued, a
+ *  rotating arc for the active role, a filled check seal on success, a cross
+ *  seal on error, and a dashed ring when the role never ran. The arc uses the
+ *  shared spinner geometry and rotates via SMIL because styles.css (DESIGN's
+ *  file) defines no spin keyframe; with reduced motion the arc is static. */
+function StateIcon({ state, color, reduced }: { state: DisplayState; color: string; reduced: boolean }) {
+  const style: CSSProperties = { flex: '0 0 auto', display: 'block' };
+  if (state === 'active') {
+    return (
+      <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" style={style}>
+        <circle cx="12" cy="12" r="8.4" fill="none" stroke={color} strokeWidth="2.2" opacity="0.22" />
+        <path d={ICON_PATHS.spinner[0]} fill="none" stroke={color} strokeWidth="2.4" strokeLinecap="round">
+          {reduced ? null : (
+            <animateTransform
+              attributeName="transform"
+              type="rotate"
+              from="0 12 12"
+              to="360 12 12"
+              dur="0.8s"
+              repeatCount="indefinite"
+            />
+          )}
+        </path>
+      </svg>
+    );
+  }
+  if (state === 'done' || state === 'error') {
+    const done = state === 'done';
+    return (
+      <span
+        className={`pipe-seal pipe-seal--${state}`}
+        aria-hidden="true"
+        style={{
+          flex: '0 0 auto',
+          width: 16,
+          height: 16,
+          borderRadius: '50%',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: done ? 'var(--ok)' : 'var(--err)',
+          color: 'var(--bg-0)',
+        }}
+      >
+        {done ? <CheckIcon size={10} strokeWidth={3} /> : <CloseIcon size={10} strokeWidth={3} />}
+      </span>
+    );
+  }
+  if (state === 'skipped') {
+    return (
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" style={style}>
+        <circle cx="8" cy="8" r="5.5" fill="none" stroke="var(--text-2)" strokeWidth="1.4" strokeDasharray="3 2.4" />
+      </svg>
+    );
+  }
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" style={style}>
+      <circle cx="8" cy="8" r="5.5" fill="none" stroke="var(--border-1)" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+const SEV_TH: CSSProperties = {
+  textAlign: 'left',
+  padding: '4px var(--sp-2)',
+  fontSize: 'var(--fs-micro)',
+  fontWeight: 700,
+  letterSpacing: '0.07em',
+  textTransform: 'uppercase',
+  color: 'var(--text-2)',
+  borderBottom: '1px solid var(--border-0)',
+  background: 'var(--bg-1)',
+};
+
+const SEV_TD: CSSProperties = {
+  padding: '4px var(--sp-2)',
+  borderBottom: '1px solid var(--border-0)',
+  verticalAlign: 'middle',
+};
 
 interface RoleTiming {
   startedAt?: number;
@@ -230,6 +389,7 @@ export function AgentTimeline({
   const [confirming, setConfirming] = useState(false);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [elapsedMs, setElapsedMs] = useState(0);
+  const reducedMotion = useReducedMotion();
   const confirmTimer = useRef<number | undefined>(undefined);
   const feedRef = useRef<HTMLDivElement>(null);
   const stuckRef = useRef(true);
@@ -359,8 +519,29 @@ export function AgentTimeline({
     .sort();
   const showElapsed = running || elapsedMs > 0;
 
-  function renderRole(role: string, label: string) {
+  /* The rendered pipeline: fixed roles in pipeline order, then any custom
+   * roles the server sent, alphabetically. */
+  const pipeline: Array<{ role: string; label: string }> = [
+    ...ROLE_IDS.map((role) => ({ role, label: ROLE_LABELS[role] })),
+    ...extraRoles.map((role) => ({ role, label: role })),
+  ];
+
+  /* Team counts for the header summary (e.g. 2 done, 1 active, 2 queued). */
+  const counts: Record<DisplayState, number> = { queued: 0, active: 0, done: 0, skipped: 0, error: 0 };
+  for (const item of pipeline) counts[roleDisplay(item.role, activity, phase).state] += 1;
+  const countSegs: Array<{ key: string; text: string; color: string }> = [];
+  if (counts.done > 0) countSegs.push({ key: 'done', text: `${counts.done} done`, color: 'var(--ok)' });
+  if (counts.active > 0) countSegs.push({ key: 'active', text: `${counts.active} active`, color: 'var(--accent)' });
+  if (counts.queued > 0) countSegs.push({ key: 'queued', text: `${counts.queued} queued`, color: 'var(--text-2)' });
+  if (counts.error > 0) countSegs.push({ key: 'error', text: `${counts.error} ${counts.error === 1 ? 'error' : 'errors'}`, color: 'var(--err)' });
+  if (counts.skipped > 0) countSegs.push({ key: 'skipped', text: `${counts.skipped} skipped`, color: 'var(--text-2)' });
+
+  /* Severity table: errors first, stable within a severity. */
+  const sortedIssues = [...issues].sort((a, b) => SEV_RANK[a.severity] - SEV_RANK[b.severity]);
+
+  function renderRole(role: string, label: string, index: number, total: number) {
     const { state, note } = roleDisplay(role, activity, phase);
+    const accent = roleColor(role);
     const timing = timingsRef.current.get(role);
     let duration: string | null = null;
     if (state === 'active' && timing?.startedAt !== undefined) {
@@ -372,43 +553,164 @@ export function AgentTimeline({
     ) {
       duration = formatClock(timing.finishedAt - timing.startedAt);
     }
+    /* The active card surfaces the live activity line plus the file being
+     * written (when the note names one). */
+    const writing = state === 'active' ? writingFileOf(note, files) : null;
+    const writingKnown = writing !== null && files.some((f) => f.path === writing);
     return (
-      <li key={role} className="role-item" style={state === 'skipped' ? { opacity: 0.55 } : undefined}>
-        <div className={`role-row role--${state}`}>
-          <span className="role-dot" aria-hidden="true" />
-          <span className="role-name">{label}</span>
-          <span
-            className="role-duration"
-            style={{
-              textAlign: 'right',
-              fontFamily: 'var(--font-mono)',
-              fontSize: 10,
-              color: 'var(--text-2)',
-            }}
-          >
-            {duration ?? ''}
-          </span>
-          <span className="role-state">{STATE_LABELS[state]}</span>
-        </div>
-        {state === 'active' && note !== undefined && (
+      <li
+        key={role}
+        className={`pipe-item pipe--${state}`}
+        style={{
+          position: 'relative',
+          display: 'grid',
+          gridTemplateColumns: '22px 1fr',
+          gap: 'var(--sp-2)',
+          opacity: state === 'skipped' ? 0.55 : 1,
+        }}
+      >
+        <span
+          className="pipe-node"
+          aria-hidden="true"
+          style={{ position: 'relative', display: 'flex', justifyContent: 'center', paddingTop: 5 }}
+        >
+          {index < total - 1 && (
+            <span
+              className="pipe-spine"
+              style={{
+                position: 'absolute',
+                top: 23,
+                bottom: -3,
+                left: '50%',
+                width: 2,
+                marginLeft: -1,
+                borderRadius: 1,
+                background: state === 'done' ? 'rgba(63, 206, 139, 0.35)' : 'var(--border-0)',
+              }}
+            />
+          )}
+          <StateIcon state={state} color={accent} reduced={reducedMotion} />
+        </span>
+        <div
+          className={`pipe-card role--${state}`}
+          style={{
+            minWidth: 0,
+            padding: '3px var(--sp-2) 4px',
+            borderRadius: 'var(--radius-s)',
+            border: `1px solid ${state === 'active' ? hexA(accent, 0.45) : 'transparent'}`,
+            borderLeft: `2px solid ${state === 'active' ? accent : 'transparent'}`,
+            background: state === 'active' ? hexA(accent, 0.09) : 'transparent',
+          }}
+        >
           <div
-            className="role-activity"
-            title={note}
-            style={{
-              padding: '0 var(--sp-2) 4px 26px',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-              fontSize: 11,
-              color: 'var(--text-1)',
-            }}
+            className="pipe-card-row"
+            style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', minHeight: 22 }}
           >
-            {capFirst(note)}
-            <span aria-hidden="true" style={{ animation: 'pulse 1.1s ease-in-out infinite' }}>
-              ...
+            <span
+              className="role-name"
+              style={{
+                flex: '1 1 auto',
+                minWidth: 0,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {label}
+            </span>
+            <span
+              className="role-duration"
+              style={{ flex: '0 0 auto', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-2)' }}
+            >
+              {duration ?? ''}
+            </span>
+            <span
+              className="role-state"
+              style={{
+                flex: '0 0 auto',
+                color:
+                  state === 'active'
+                    ? 'var(--accent)'
+                    : state === 'done'
+                      ? 'var(--ok)'
+                      : state === 'error'
+                        ? 'var(--err)'
+                        : 'var(--text-2)',
+              }}
+            >
+              {STATE_LABELS[state]}
             </span>
           </div>
-        )}
+          {state === 'active' && (
+            <div className="pipe-activity" style={{ paddingBottom: 2 }}>
+              <div
+                className="pipe-activity-line"
+                title={note}
+                style={{
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  fontSize: 11,
+                  color: 'var(--text-1)',
+                }}
+              >
+                {note !== undefined ? capFirst(note) : 'Working'}
+                <span aria-hidden="true" style={{ animation: 'pulse 1.1s ease-in-out infinite' }}>
+                  ...
+                </span>
+              </div>
+              {writing !== null && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3, minWidth: 0 }}>
+                  <span
+                    className="muted"
+                    style={{ flex: '0 0 auto', fontSize: 10, letterSpacing: '0.05em', textTransform: 'uppercase' }}
+                  >
+                    writing
+                  </span>
+                  {writingKnown ? (
+                    <button
+                      type="button"
+                      className="chip pipe-writing"
+                      title={`Open ${writing} in the Code tab`}
+                      onClick={() => openInCode(writing)}
+                      style={{
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        maxWidth: '100%',
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 10,
+                      }}
+                    >
+                      <FileIcon path={writing} />
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {writing}
+                      </span>
+                    </button>
+                  ) : (
+                    <span
+                      className="chip"
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        maxWidth: '100%',
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 10,
+                      }}
+                    >
+                      <FileIcon path={writing} />
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {writing}
+                      </span>
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </li>
     );
   }
@@ -430,7 +732,9 @@ export function AgentTimeline({
           borderRadius: 'var(--radius-s)',
           background: 'var(--bg-1)',
           marginBottom: 'var(--sp-1)',
-          animation: 'ff-flash 900ms ease-out',
+          /* done-in = mount rise/fade, ff-flash = "newly written" background
+           * sweep; the global prefers-reduced-motion rule collapses both. */
+          animation: 'done-in 240ms cubic-bezier(0.2, 0.9, 0.25, 1), ff-flash 900ms ease-out',
         }}
       >
         <div
@@ -441,6 +745,12 @@ export function AgentTimeline({
             type="button"
             className="ff-main"
             onClick={() => toggleExpand(f.path)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape' && isOpen) {
+                e.stopPropagation();
+                toggleExpand(f.path);
+              }
+            }}
             aria-expanded={isOpen}
             title={isOpen ? 'Collapse preview' : `Preview first ${PREVIEW_LINES} lines`}
             style={{
@@ -582,6 +892,31 @@ export function AgentTimeline({
           </svg>
           Agent team
         </button>
+        <span
+          className="team-counts"
+          aria-live="polite"
+          title={countSegs.map((s) => s.text).join(', ')}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            fontSize: 'var(--fs-small)',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {countSegs.map((s, i) => (
+            <span key={s.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              {i > 0 && (
+                <span aria-hidden="true" style={{ color: 'var(--text-2)' }}>
+                  {'\u00b7'}
+                </span>
+              )}
+              <span className={`team-count team-count--${s.key}`} style={{ color: s.color, fontWeight: 600 }}>
+                {s.text}
+              </span>
+            </span>
+          ))}
+        </span>
         {phase !== undefined && (
           <span className="tl-banner" style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-2)' }}>
             <span className={`phase-badge phase--${phase.toLowerCase()}`}>{phase}</span>
@@ -603,6 +938,12 @@ export function AgentTimeline({
             type="button"
             className={`btn btn--s ${confirming ? 'btn--danger' : 'btn--ghost'}`}
             onClick={clickCancel}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape' && confirming) {
+                e.stopPropagation();
+                setConfirming(false);
+              }
+            }}
             disabled={cancelling}
           >
             {cancelling ? 'Cancelling...' : confirming ? 'Confirm cancel' : 'Cancel build'}
@@ -612,10 +953,20 @@ export function AgentTimeline({
 
       {open && (
         <div className="timeline-body" id="timeline-body">
-          <ul className="roles">
-            {ROLE_IDS.map((role) => renderRole(role, ROLE_LABELS[role]))}
-            {extraRoles.map((role) => renderRole(role, role))}
-          </ul>
+          <ol
+            className="pipe"
+            aria-label="Agent pipeline"
+            style={{
+              listStyle: 'none',
+              margin: 0,
+              padding: '2px 0 0',
+              display: 'grid',
+              gap: 2,
+              alignContent: 'start',
+            }}
+          >
+            {pipeline.map((item, i) => renderRole(item.role, item.label, i, pipeline.length))}
+          </ol>
 
           <div className="file-feed" ref={feedRef} onScroll={onFeedScroll} aria-label="Files written">
             {files.length === 0 ? (
@@ -626,52 +977,129 @@ export function AgentTimeline({
           </div>
 
           {issues.length > 0 && (
-            <ul className="issues" aria-label="Review findings">
-              {issues.map((issue, i) => {
-                const file = issue.file;
-                const linked = file !== undefined && files.some((f) => f.path === file);
-                return (
-                  <li key={`${issue.severity}-${i}`} className={`issue issue--${issue.severity}`}>
-                    <span className="issue-badge" aria-hidden="true">
-                      {issue.severity === 'error' ? 'x' : issue.severity === 'warn' ? '!' : 'i'}
-                    </span>
-                    <span
-                      className={`issue-sev issue-sev--${issue.severity}`}
-                      style={{
-                        flex: '0 0 auto',
-                        width: 36,
-                        fontSize: 9,
-                        fontWeight: 700,
-                        letterSpacing: '0.07em',
-                        textTransform: 'uppercase',
-                        color: SEV_COLORS[issue.severity],
-                      }}
-                    >
-                      {issue.severity}
-                    </span>
-                    <span className="issue-text" title={issue.text}>
-                      {issue.text}
-                    </span>
-                    {file !== undefined &&
-                      (linked ? (
-                        <button
-                          type="button"
-                          className="chip issue-file"
-                          title={`Open ${file} in the Code tab`}
-                          style={{ cursor: 'pointer' }}
-                          onClick={() => openInCode(file)}
-                        >
-                          {file}
-                        </button>
-                      ) : (
-                        <span className="chip" title={`${file} is not in the current file list`}>
-                          {file}
-                        </span>
-                      ))}
-                  </li>
-                );
-              })}
-            </ul>
+            <div className="sev" style={{ gridColumn: '1 / -1' }}>
+              <div
+                className="sev-head"
+                style={{
+                  display: 'flex',
+                  alignItems: 'baseline',
+                  gap: 6,
+                  margin: 'var(--sp-1) 0',
+                  fontSize: 'var(--fs-small)',
+                  fontWeight: 700,
+                  letterSpacing: '0.07em',
+                  textTransform: 'uppercase',
+                  color: 'var(--text-1)',
+                }}
+              >
+                Review findings
+                <span className="muted" style={{ fontWeight: 500, letterSpacing: 0, textTransform: 'none' }}>
+                  {issues.length}
+                </span>
+              </div>
+              <div
+                style={{
+                  overflowX: 'auto',
+                  border: '1px solid var(--border-0)',
+                  borderRadius: 'var(--radius-m)',
+                  background: 'var(--bg-0)',
+                }}
+              >
+                <table
+                  className="sev-table"
+                  aria-label="Review findings"
+                  style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', fontSize: 12 }}
+                >
+                  <thead>
+                    <tr>
+                      <th scope="col" style={{ ...SEV_TH, width: 88 }}>
+                        Severity
+                      </th>
+                      <th scope="col" style={SEV_TH}>
+                        Finding
+                      </th>
+                      <th scope="col" style={{ ...SEV_TH, width: 136 }}>
+                        File
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedIssues.map((issue, i) => {
+                      const file = issue.file;
+                      const linked = file !== undefined && files.some((f) => f.path === file);
+                      return (
+                        <tr key={`${issue.severity}-${i}`} className={`sev-row sev-row--${issue.severity}`}>
+                          <td style={SEV_TD}>
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                              <span
+                                className={`sev-dot sev-dot--${issue.severity}`}
+                                aria-hidden="true"
+                                style={{
+                                  flex: '0 0 auto',
+                                  width: 7,
+                                  height: 7,
+                                  borderRadius: '50%',
+                                  background: SEV_COLORS[issue.severity],
+                                }}
+                              />
+                              <span
+                                className={`sev-badge sev-badge--${issue.severity}`}
+                                style={{
+                                  fontSize: 9,
+                                  fontWeight: 700,
+                                  letterSpacing: '0.07em',
+                                  textTransform: 'uppercase',
+                                  color: SEV_COLORS[issue.severity],
+                                }}
+                              >
+                                {issue.severity}
+                              </span>
+                            </span>
+                          </td>
+                          <td
+                            style={{
+                              ...SEV_TD,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                              color: 'var(--text-1)',
+                            }}
+                            title={issue.text}
+                          >
+                            {issue.text}
+                          </td>
+                          <td style={{ ...SEV_TD, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {file === undefined ? (
+                              <span className="muted" aria-hidden="true">
+                                &mdash;
+                              </span>
+                            ) : linked ? (
+                              <button
+                                type="button"
+                                className="chip issue-file"
+                                title={`Open ${file} in the Code tab`}
+                                style={{ cursor: 'pointer', maxWidth: '100%', fontFamily: 'var(--font-mono)', fontSize: 10 }}
+                                onClick={() => openInCode(file)}
+                              >
+                                {file}
+                              </button>
+                            ) : (
+                              <span
+                                className="chip"
+                                title={`${file} is not in the current file list`}
+                                style={{ maxWidth: '100%', fontFamily: 'var(--font-mono)', fontSize: 10 }}
+                              >
+                                {file}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           )}
         </div>
       )}

@@ -7,7 +7,10 @@ import { promises as fs } from 'node:fs';
 // Must stay in sync with PREVIEW_CSP in preview.ts (BRIDGE-owned, not exported)
 // and with CONTENT_TYPES there: share pages render untrusted generated sites,
 // so they get the preview policy, not the app-shell policy.
-const SHARE_CSP = "default-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:";
+const SHARE_CSP =
+  "default-src 'self' 'unsafe-inline'; img-src 'self' data: https:; " +
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+  "font-src 'self' data: https://fonts.gstatic.com";
 
 const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -203,7 +206,9 @@ export function createShareApiRouter(sitesRoot: string, opts: ShareApiOptions): 
       const lanAddress = firstNonLoopbackIPv4(networkInterfaces());
       res.json({
         shareUrl: `/p/${id}/`,
-        lanUrl: lanAddress === '' ? '' : `http://${lanAddress}:${opts.httpsPort}/p/${id}/`,
+        // HTTPS scheme, not http: the TLS listener is the only one that
+        // serves /p/ — plain HTTP would hit the TLS socket and fail.
+        lanUrl: lanAddress === '' ? '' : `https://${lanAddress}:${opts.httpsPort}/p/${id}/`,
       });
     })().catch(next);
   });

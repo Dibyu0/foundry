@@ -1,20 +1,44 @@
-/** Tiny hand-rolled syntax highlighter for html/css/js. Produces plain token
- *  lists that React renders as spans — no HTML injection, no dependencies. */
+/** Tiny hand-rolled syntax highlighter for html/css/js/json. Produces plain
+ *  token lists that React renders as spans — no HTML injection, no deps. */
 
 export interface Token {
   text: string;
   cls: string | null;
 }
 
-export type Lang = 'html' | 'css' | 'js' | 'plain';
+export type Lang = 'html' | 'css' | 'js' | 'json' | 'plain';
 
 export function langFor(path: string): Lang {
   const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
   if (ext === 'html' || ext === 'htm' || ext === 'svg') return 'html';
   if (ext === 'css') return 'css';
-  if (ext === 'js' || ext === 'mjs' || ext === 'cjs') return 'js';
+  if (ext === 'js' || ext === 'mjs' || ext === 'cjs' || ext === 'jsx' || ext === 'ts' || ext === 'tsx') return 'js';
+  if (ext === 'json') return 'json';
   return 'plain';
 }
+
+/** Fallback color per token class, tuned for the editor surface token
+ *  (--editor-bg, fallback #090c11). Renderers use var(--tok-x, fallback) so
+ *  styles.css can re-theme from :root without touching markup. Every fallback
+ *  passes WCAG AA (>= 4.5:1) against both #090c11 and the legacy --bg-0.
+ *
+ *  tok-c comment | tok-s string | tok-k keyword | tok-n number | tok-f call
+ *  tok-a attr/prop | tok-t tag/selector | tok-p punct | tok-d doctype/dim
+ *  tok-b boolean/null constant | tok-r regex literal | tok-e string escape */
+export const TOKEN_FALLBACKS: Record<string, string> = {
+  'tok-c': '#8b98ab',
+  'tok-s': '#9fd6a3',
+  'tok-k': '#c792ea',
+  'tok-n': '#f78c6c',
+  'tok-f': '#82aaff',
+  'tok-a': '#6ec6ff',
+  'tok-t': '#ff8a5c',
+  'tok-p': '#8fa3bf',
+  'tok-d': '#707b8a',
+  'tok-b': '#ffcb6b',
+  'tok-r': '#5eead4',
+  'tok-e': '#ffd479',
+};
 
 interface GroupDef {
   name: string;
@@ -46,21 +70,60 @@ function runGroups(src: string, defs: GroupDef[]): Token[] {
 }
 
 const JS_CODE_DEFS: GroupDef[] = [
+  { name: 'constant', re: /\b(?:true|false|null|undefined|NaN|Infinity)\b/, cls: 'tok-b' },
   {
     name: 'keyword',
-    re: /\b(?:const|let|var|function|return|if|else|for|while|do|break|continue|new|class|extends|super|this|typeof|instanceof|in|of|try|catch|finally|throw|switch|case|default|import|export|from|as|async|await|yield|static|get|set|null|undefined|true|false|void|delete)\b/,
+    re: /\b(?:const|let|var|function|return|if|else|for|while|do|break|continue|new|class|extends|super|this|typeof|instanceof|in|of|try|catch|finally|throw|switch|case|default|import|export|from|as|async|await|yield|static|get|set|void|delete)\b/,
     cls: 'tok-k',
   },
-  { name: 'number', re: /\b(?:0x[\da-fA-F]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/, cls: 'tok-n' },
+  {
+    name: 'number',
+    re: /(?:0x[\da-fA-F_]+|0b[01_]+|0o[0-7_]+|\b\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?n?|\.\d+(?:[eE][+-]?\d+)?)/,
+    cls: 'tok-n',
+  },
   { name: 'call', re: /[A-Za-z_$][\w$]*(?=\s*\()/, cls: 'tok-f' },
   { name: 'prop', re: /\.[A-Za-z_$][\w$]*/, cls: 'tok-a' },
 ];
 
+/** Keywords after which a `/` opens a regex rather than a division. */
+const REGEX_PREFIX_WORDS = new Set([
+  'return',
+  'typeof',
+  'case',
+  'throw',
+  'else',
+  'do',
+  'in',
+  'of',
+  'new',
+  'delete',
+  'void',
+  'instanceof',
+  'await',
+  'yield',
+]);
+
+/** Heuristic: a `/` starts a regex literal when the previous significant
+ *  token cannot end an expression (operator, opener, or prefix keyword). */
+function regexAllowedBefore(src: string, i: number): boolean {
+  let k = i - 1;
+  while (k >= 0 && (src[k] === ' ' || src[k] === '\t')) k -= 1;
+  if (k < 0) return true;
+  const pc = src[k];
+  if ('([{,;:=!&|?+-*~^<>%\n'.includes(pc)) return true;
+  if (/[A-Za-z_$]/.test(pc)) {
+    const m = /[A-Za-z_$][\w$]*$/.exec(src.slice(0, k + 1));
+    if (m && REGEX_PREFIX_WORDS.has(m[0])) return true;
+  }
+  return false;
+}
+
 type JsState = 'code' | 'sq' | 'dq' | 'tpl' | 'line-comment' | 'block-comment';
 
-/** State-machine tokenizer for js: strings ('' ""), template literals with
- *  ${} expressions (nestable), line/block comments and escapes are tracked as
- *  explicit states; plain code spans go through the keyword/number groups. */
+/** State-machine tokenizer for js: strings ('' "") with escape sequences
+ *  (tok-e), template literals with ${} expressions (nestable), regex literals
+ *  (tok-r, heuristic), line/block comments; plain code spans go through the
+ *  keyword/constant/number groups. */
 function tokenizeJs(src: string): Token[] {
   const tokens: Token[] = [];
   let state: JsState = 'code';
@@ -74,6 +137,30 @@ function tokenizeJs(src: string): Token[] {
   };
   const flush = (cls: string, end: number) => {
     if (end > segStart) tokens.push({ text: src.slice(segStart, end), cls });
+  };
+  // split a string/template span into string chunks and escape sequences
+  const flushString = (end: number) => {
+    let chunk = segStart;
+    let k = segStart;
+    while (k < end) {
+      if (src[k] === '\\' && k + 1 < end) {
+        if (k > chunk) tokens.push({ text: src.slice(chunk, k), cls: 'tok-s' });
+        let e = k + 2;
+        if (src[k + 1] === 'x') e = Math.min(end, k + 4);
+        else if (src[k + 1] === 'u') {
+          if (src[k + 2] === '{') {
+            const close = src.indexOf('}', k + 3);
+            e = close === -1 || close >= end ? k + 3 : close + 1;
+          } else e = Math.min(end, k + 6);
+        }
+        tokens.push({ text: src.slice(k, e), cls: 'tok-e' });
+        k = e;
+        chunk = e;
+        continue;
+      }
+      k += 1;
+    }
+    if (end > chunk) tokens.push({ text: src.slice(chunk, end), cls: 'tok-s' });
   };
   let i = 0;
   while (i < src.length) {
@@ -92,6 +179,32 @@ function tokenizeJs(src: string): Token[] {
         state = 'block-comment';
         segStart = i;
         i += 2;
+        continue;
+      }
+      if (c === '/' && regexAllowedBefore(src, i)) {
+        flushCode(i);
+        segStart = i;
+        let j = i + 1;
+        let inClass = false;
+        while (j < src.length) {
+          const ch = src[j];
+          if (ch === '\\') {
+            j += 2;
+            continue;
+          }
+          if (ch === '\n') break;
+          if (ch === '[') inClass = true;
+          else if (ch === ']') inClass = false;
+          else if (ch === '/' && !inClass) {
+            j += 1;
+            break;
+          }
+          j += 1;
+        }
+        while (j < src.length && /[a-z]/.test(src[j])) j += 1;
+        flush('tok-r', j);
+        segStart = j;
+        i = j;
         continue;
       }
       if (c === "'" || c === '"' || c === '`') {
@@ -122,12 +235,12 @@ function tokenizeJs(src: string): Token[] {
         continue;
       }
       if (c === (state === 'sq' ? "'" : '"')) {
-        flush('tok-s', i + 1);
+        flushString(i + 1);
         state = 'code';
         segStart = i + 1;
       } else if (c === '\n') {
         // unterminated string: JS source lines cannot carry a raw quote across
-        flush('tok-s', i);
+        flushString(i);
         state = 'code';
         segStart = i;
       }
@@ -140,14 +253,15 @@ function tokenizeJs(src: string): Token[] {
         continue;
       }
       if (c === '`') {
-        flush('tok-s', i + 1);
+        flushString(i + 1);
         state = 'code';
         segStart = i + 1;
         i += 1;
         continue;
       }
       if (c === '$' && next === '{') {
-        flush('tok-s', i + 2);
+        flushString(i);
+        tokens.push({ text: '${', cls: 'tok-s' });
         tplExpr.push(depth);
         state = 'code';
         segStart = i + 2;
@@ -177,7 +291,8 @@ function tokenizeJs(src: string): Token[] {
     i += 1;
   }
   if (state === 'code') flushCode(src.length);
-  else flush(state === 'line-comment' || state === 'block-comment' ? 'tok-c' : 'tok-s', src.length);
+  else if (state === 'line-comment' || state === 'block-comment') flush('tok-c', src.length);
+  else flushString(src.length);
   return tokens;
 }
 
@@ -187,12 +302,21 @@ const CSS_DEFS: GroupDef[] = [
   { name: 'string', re: /"[^"\n]*"|'[^'\n]*'/, cls: 'tok-s' },
   { name: 'selector', re: /[^{}\n]+(?=\{)/, cls: 'tok-t' },
   { name: 'property', re: /[a-zA-Z-]+(?=\s*:)/, cls: 'tok-a' },
+  { name: 'func', re: /[\w-]+(?=\()/, cls: 'tok-f' },
   {
     name: 'number',
     re: /#[\da-fA-F]{3,8}\b|\b\d+(?:\.\d+)?(?:px|rem|em|%|vh|vw|svh|lvh|dvh|s|ms|deg|fr|ch|ex|vmin|vmax|cm|mm|in|pt|pc)?\b/,
     cls: 'tok-n',
   },
   { name: 'punct', re: /[{};]|!important/, cls: 'tok-p' },
+];
+
+const JSON_DEFS: GroupDef[] = [
+  { name: 'key', re: /"(?:[^"\\\n]|\\.)*"(?=\s*:)/, cls: 'tok-a' },
+  { name: 'string', re: /"(?:[^"\\\n]|\\.)*"/, cls: 'tok-s' },
+  { name: 'constant', re: /\b(?:true|false|null)\b/, cls: 'tok-b' },
+  { name: 'number', re: /-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/, cls: 'tok-n' },
+  { name: 'punct', re: /[[\]{},:]/, cls: 'tok-p' },
 ];
 
 function tokenizeHtml(src: string): Token[] {
@@ -228,7 +352,11 @@ function tokenizeHtml(src: string): Token[] {
     if (src[i] === '<' && /[a-zA-Z/]/.test(src[i + 1] ?? '')) {
       flush();
       let j = i + 1;
-      if (src[j] === '/') j += 1;
+      let isCloseTag = false;
+      if (src[j] === '/') {
+        isCloseTag = true;
+        j += 1;
+      }
       const name = /^[a-zA-Z][\w-]*/.exec(src.slice(j));
       if (!name) {
         buf += src[i];
@@ -261,10 +389,24 @@ function tokenizeHtml(src: string): Token[] {
         push(src[j], 'tok-p');
         j += 1;
       }
+      let close = '';
       if (j < src.length) {
-        const close = src.startsWith('/>', j) ? '/>' : '>';
+        close = src.startsWith('/>', j) ? '/>' : '>';
         push(close, 'tok-p');
         j += close.length;
+      }
+      // inline script/style bodies get the full js/css tokenizers
+      const tag = name[0].toLowerCase();
+      if (close === '>' && !isCloseTag && (tag === 'script' || tag === 'style')) {
+        const closer = tag === 'script' ? /<\/script\s*>/i : /<\/style\s*>/i;
+        const rest = src.slice(j);
+        const m = closer.exec(rest);
+        const innerLen = m ? m.index : rest.length;
+        if (innerLen > 0) {
+          const inner = rest.slice(0, innerLen);
+          tokens.push(...(tag === 'script' ? tokenizeJs(inner) : runGroups(inner, CSS_DEFS)));
+          j += innerLen;
+        }
       }
       i = j;
       continue;
@@ -299,5 +441,6 @@ export function highlightLines(content: string, lang: Lang): Token[][] {
   if (lang === 'html') return tokensToLines(tokenizeHtml(content));
   if (lang === 'css') return tokensToLines(runGroups(content, CSS_DEFS));
   if (lang === 'js') return tokensToLines(tokenizeJs(content));
+  if (lang === 'json') return tokensToLines(runGroups(content, JSON_DEFS));
   return tokensToLines([{ text: content, cls: null }]);
 }

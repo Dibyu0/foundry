@@ -34,6 +34,7 @@ const EXTERNAL_REF = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
 const LINK_TAG = /<link\b[^>]*>/gi;
 const SCRIPT_TAG = /<script\b[^>]*>[\s\S]*?<\/script\s*>/gi;
 const CSS_URL = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)/gi;
+const BODY_CLOSE = /<\/body\s*>/gi;
 // Tags whose src/href embeds a resource (anchors handled separately).
 const EMBED_TAG = /<(?:img|source|video|audio|iframe|embed|track)\b[^>]*>/gi;
 const ANCHOR_TAG = /<a\b[^>]*>/gi;
@@ -87,6 +88,87 @@ function isValidUtf8(content: string): boolean {
   return !content.includes('�');
 }
 
+/** Directory part of a site-relative path ('css/main.css' -> 'css'), '' at the root. */
+function stylesheetDir(path: string): string {
+  const slash = path.lastIndexOf('/');
+  return slash === -1 ? '' : path.slice(0, slash);
+}
+
+/**
+ * Resolves a css url() target against the directory of the stylesheet it
+ * came from, returning the root-relative path (query/hash preserved), or
+ * null when the url must be left untouched: root stylesheets, fragments,
+ * root-absolute, external, or anything that would escape above the root.
+ * Inlined styles live at the document root, so a relative url() that used
+ * to resolve against the stylesheet's directory would otherwise point at
+ * the wrong file.
+ */
+function resolveCssPath(ref: string, dir: string): string | null {
+  if (dir === '' || ref === '' || ref.startsWith('#') || ref.startsWith('/') || EXTERNAL_REF.test(ref)) {
+    return null;
+  }
+  const m = /^([^?#]*)([?#][\s\S]*)?$/.exec(ref);
+  const bare = (m?.[1] ?? '').replace(/\\/g, '/');
+  const suffix = m?.[2] ?? '';
+  if (bare === '') return null;
+  const out: string[] = [];
+  for (const seg of `${dir}/${bare}`.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      if (out.length === 0) return null;
+      out.pop();
+    } else {
+      out.push(seg);
+    }
+  }
+  if (out.length === 0) return null;
+  return out.join('/') + suffix;
+}
+
+/** Rewrites relative url()s in a stylesheet being inlined, keeping the
+ * original quoting; urls resolveCssPath refuses are left verbatim. */
+function rewriteCssUrls(css: string, dir: string): string {
+  CSS_URL.lastIndex = 0;
+  return css.replace(CSS_URL, (whole: string, dq?: string, sq?: string, bare?: string) => {
+    const ref = (dq ?? sq ?? bare ?? '').trim();
+    const resolved = resolveCssPath(ref, dir);
+    if (resolved === null || resolved === ref) return whole;
+    if (dq !== undefined) return `url("${resolved}")`;
+    if (sq !== undefined) return `url('${resolved}')`;
+    return `url(${resolved})`;
+  });
+}
+
+// HTML "JavaScript MIME type essence match": a script whose type is missing,
+// empty, or one of these essences is a classic script and can be inlined as
+// one. Everything else (module, importmap, data blocks like application/json)
+// must keep its own tag: inlining it as a classic script would either be a
+// SyntaxError (import/export) or run content the page never executes.
+const CLASSIC_SCRIPT_TYPES = new Set([
+  'application/ecmascript',
+  'application/javascript',
+  'application/x-ecmascript',
+  'application/x-javascript',
+  'text/ecmascript',
+  'text/javascript',
+  'text/javascript1.0',
+  'text/javascript1.1',
+  'text/javascript1.2',
+  'text/javascript1.3',
+  'text/javascript1.4',
+  'text/javascript1.5',
+  'text/jscript',
+  'text/livescript',
+  'text/x-ecmascript',
+  'text/x-javascript',
+]);
+
+function isClassicScriptType(type: string | undefined): boolean {
+  if (type === undefined) return true;
+  const essence = type.split(';')[0]?.trim().toLowerCase() ?? '';
+  return essence === '' || CLASSIC_SCRIPT_TYPES.has(essence);
+}
+
 interface DeferredScript {
   path: string;
   content: string;
@@ -135,6 +217,22 @@ export function bundleSite(files: ReadonlyMap<string, string>): BundleResult {
       }
       referenced.add(local);
       if (inlinedSet.has(local)) return tag;
+      // Only a plain rel=stylesheet can become an always-on style block:
+      // an alternate sheet is off until the user selects it, a titled sheet
+      // belongs to a named style set, and a disabled sheet must stay off.
+      // Inlining any of those would force them on globally (a print sheet
+      // hiding the whole page, for instance). media is carried onto the
+      // style tag instead, so a conditional sheet stays conditional.
+      const title = getAttr(tag, 'title');
+      let blocked: string | null = null;
+      if (tokens.includes('alternate')) blocked = 'alternate stylesheet is disabled until selected';
+      else if (tokens.length !== 1) blocked = `rel="${getAttr(tag, 'rel') ?? ''}" is not a plain stylesheet`;
+      if (blocked === null && title !== undefined) blocked = 'titled stylesheet belongs to a named style set';
+      if (blocked === null && hasAttr(tag, 'disabled')) blocked = 'disabled stylesheet';
+      if (blocked !== null) {
+        skip(local, `${blocked}; left linked (inlining would force it on globally)`);
+        return tag;
+      }
       const content = inlineContent(local, 'style');
       if (content === null) {
         if (!files.has(local)) skip(local, 'referenced stylesheet not found in site files; left linked');
@@ -142,7 +240,10 @@ export function bundleSite(files: ReadonlyMap<string, string>): BundleResult {
       }
       inlined.push(local);
       inlinedSet.add(local);
-      return `<style data-inlined-from="${local}">\n${escapeStyle(content)}\n</style>`;
+      const media = getAttr(tag, 'media');
+      const mediaAttr = media === undefined ? '' : ` media="${media.replace(/"/g, '&quot;')}"`;
+      const css = rewriteCssUrls(content, stylesheetDir(local));
+      return `<style data-inlined-from="${local}"${mediaAttr}>\n${escapeStyle(css)}\n</style>`;
     }
     // Icons, manifests, preloads, font links: embedded resources we do not inline.
     if (local !== null) {
@@ -165,6 +266,11 @@ export function bundleSite(files: ReadonlyMap<string, string>): BundleResult {
     }
     referenced.add(local);
     if (inlinedSet.has(local)) return tag;
+    const type = getAttr(open, 'type');
+    if (!isClassicScriptType(type)) {
+      skip(local, `script type "${(type ?? '').trim()}" is not a classic script; left linked (inlining would run it as one)`);
+      return tag;
+    }
     const content = inlineContent(local, 'script');
     if (content === null) {
       if (!files.has(local)) skip(local, 'referenced script not found in site files; left linked');
@@ -185,27 +291,37 @@ export function bundleSite(files: ReadonlyMap<string, string>): BundleResult {
 
   if (deferred.length > 0) {
     const insertion = deferred.map((d) => d.content).join('\n');
-    const bodyClose = /<\/body\s*>/i.exec(html);
-    if (bodyClose) {
+    // Inlined script/style content may contain a literal "</body>" (inside
+    // a string, for instance); the document's own body close is the last
+    // one, so inserting before the first match could land inside content.
+    BODY_CLOSE.lastIndex = 0;
+    let bodyClose: RegExpExecArray | null = null;
+    for (let m = BODY_CLOSE.exec(html); m !== null; m = BODY_CLOSE.exec(html)) {
+      bodyClose = m;
+    }
+    if (bodyClose !== null) {
       html = `${html.slice(0, bodyClose.index)}${insertion}\n${html.slice(bodyClose.index)}`;
     } else {
       html = `${html}\n${insertion}\n`;
     }
   }
 
-  // Assets referenced from inlined CSS keep their relative URLs; the files
-  // are not embedded, so report them.
+  // Assets referenced from inlined CSS are not embedded, so report them,
+  // resolved against the stylesheet's directory the same way the inlined
+  // url()s were rewritten.
   for (const path of inlined) {
     const content = files.get(path);
     if (content === undefined || !path.endsWith('.css')) continue;
+    const dir = stylesheetDir(path);
     CSS_URL.lastIndex = 0;
     for (let m = CSS_URL.exec(content); m !== null; m = CSS_URL.exec(content)) {
       const ref = (m[1] ?? m[2] ?? m[3] ?? '').trim();
       if (ref === '' || /^data:/i.test(ref) || ref.startsWith('#')) continue;
       const local = localPath(ref);
       if (local !== null) {
-        referenced.add(local);
-        if (!inlinedSet.has(local)) skip(local, 'asset referenced from inlined CSS; left linked (not embedded)');
+        const resolved = resolveCssPath(local, dir) ?? local;
+        referenced.add(resolved);
+        if (!inlinedSet.has(resolved)) skip(resolved, 'asset referenced from inlined CSS; left linked (not embedded)');
       } else {
         skip(ref, 'external asset referenced from inlined CSS; stays linked');
       }

@@ -34,6 +34,13 @@ export interface ConsoleRow {
   details?: string;
 }
 
+/** Severity tallies reported to the workspace tab badge. */
+export interface ConsoleCounts {
+  total: number;
+  errors: number;
+  warnings: number;
+}
+
 export type ConsoleFilter = 'all' | 'log' | 'warn' | 'error' | 'network';
 
 function rec(v: unknown): Record<string, unknown> | undefined {
@@ -105,17 +112,10 @@ function formatTime(ts: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-const LEVEL_COLOR: Record<RowLevel, string> = {
-  log: 'var(--text-2)',
-  warn: 'var(--warn)',
-  error: 'var(--err)',
-};
-
 function LevelIcon({ row }: { row: ConsoleRow }) {
-  const color = LEVEL_COLOR[row.level];
   if (row.kind === 'network') {
     return (
-      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style={{ color, flexShrink: 0 }}>
+      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" className="console-row-icon">
         <path
           d="M1.5 4h7M7 2.5 8.5 4 7 5.5M10.5 8h-7M5 6.5 3.5 8 5 9.5"
           stroke="currentColor"
@@ -128,7 +128,7 @@ function LevelIcon({ row }: { row: ConsoleRow }) {
     );
   }
   return (
-    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style={{ color, flexShrink: 0 }}>
+    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" className="console-row-icon">
       <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.1" fill="none" />
       {row.level === 'error' ? (
         <path d="M4.2 4.2 7.8 7.8M7.8 4.2 4.2 7.8" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
@@ -149,19 +149,9 @@ const FILTERS: { id: ConsoleFilter; label: string }[] = [
   { id: 'network', label: 'Network' },
 ];
 
-const toolbarBtnStyle: React.CSSProperties = {
-  padding: '2px 8px',
-  background: 'var(--bg-2)',
-  border: '1px solid var(--border-0)',
-  borderRadius: 'var(--radius-s)',
-  color: 'var(--text-1)',
-  font: 'inherit',
-  cursor: 'pointer',
-};
-
 interface ConsoleTabProps {
   buildId: string;
-  onCountChange?: (count: number) => void;
+  onCountChange?: (counts: ConsoleCounts) => void;
 }
 
 export function ConsoleTab({ buildId, onCountChange }: ConsoleTabProps) {
@@ -201,8 +191,14 @@ export function ConsoleTab({ buildId, onCountChange }: ConsoleTabProps) {
   }, []);
 
   useEffect(() => {
-    onCountChange?.(rows.length);
-  }, [rows.length, onCountChange]);
+    let errors = 0;
+    let warnings = 0;
+    for (const row of rows) {
+      if (row.level === 'error') errors += 1;
+      else if (row.level === 'warn') warnings += 1;
+    }
+    onCountChange?.({ total: rows.length, errors, warnings });
+  }, [rows, onCountChange]);
 
   useEffect(
     () => () => {
@@ -240,7 +236,7 @@ export function ConsoleTab({ buildId, onCountChange }: ConsoleTabProps) {
         }
         throw new Error(message);
       }
-      showToast('ok', 'Sent to the team — the builder will attempt a fix.');
+      showToast('ok', 'Sent to the team - the builder will attempt a fix.');
     } catch (e) {
       showToast('err', e instanceof Error ? e.message : 'Fix request failed.');
     } finally {
@@ -260,103 +256,93 @@ export function ConsoleTab({ buildId, onCountChange }: ConsoleTabProps) {
   const visible = rows.filter((r) => rowMatchesFilter(r, filter));
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', fontSize: 12, color: 'var(--text-1)' }}>
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '6px 10px',
-          borderBottom: '1px solid var(--border-0)',
-          flexWrap: 'wrap',
-        }}
-      >
-        <div role="group" aria-label="Filter console entries" style={{ display: 'flex', gap: 4 }}>
+    <div className="console">
+      <div className="console-toolbar">
+        <div className="console-filters" role="group" aria-label="Filter console entries">
           {FILTERS.map((f) => (
             <button
               key={f.id}
               type="button"
-              style={{
-                ...toolbarBtnStyle,
-                ...(filter === f.id ? { borderColor: 'var(--accent)', color: 'var(--text-0)' } : null),
-              }}
+              className="console-filter"
               aria-pressed={filter === f.id}
               onClick={() => setFilter(f.id)}
             >
               {f.label}
               {f.id !== 'all' && (
-                <span style={{ color: 'var(--text-2)', marginLeft: 4 }}>
-                  {rows.filter((r) => rowMatchesFilter(r, f.id)).length}
-                </span>
+                <span className="console-filter-count">{rows.filter((r) => rowMatchesFilter(r, f.id)).length}</span>
               )}
             </button>
           ))}
         </div>
-        <span style={{ flex: 1 }} />
-        {paused && dropped > 0 && <span style={{ color: 'var(--warn)' }}>paused — {dropped} dropped</span>}
-        <button
-          type="button"
-          style={toolbarBtnStyle}
-          aria-pressed={paused}
-          onClick={() => {
-            setPaused((p) => !p);
-            setDropped(0);
-          }}
-        >
-          {paused ? 'Resume capture' : 'Pause capture'}
-        </button>
-        <button
-          type="button"
-          style={toolbarBtnStyle}
-          disabled={rows.length === 0}
-          onClick={() => {
-            setRows([]);
-            setExpanded(new Set());
-          }}
-        >
-          Clear
-        </button>
+        <div className="console-actions">
+          {paused && dropped > 0 && <span className="console-paused-note">paused - {dropped} dropped</span>}
+          <button
+            type="button"
+            className="console-action"
+            aria-pressed={paused}
+            onClick={() => {
+              setPaused((p) => !p);
+              setDropped(0);
+            }}
+          >
+            {paused ? 'Resume capture' : 'Pause capture'}
+          </button>
+          <button
+            type="button"
+            className="console-action"
+            disabled={rows.length === 0}
+            onClick={() => {
+              setRows([]);
+              setExpanded(new Set());
+            }}
+          >
+            Clear
+          </button>
+        </div>
       </div>
 
-      <div role="log" aria-label="Preview console" style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
+      <div className="console-log" role="log" aria-label="Preview console">
         {visible.length === 0 ? (
-          <p style={{ padding: '12px', margin: 0, color: 'var(--text-2)' }}>
-            {rows.length === 0
-              ? 'Console output, page errors and network requests from the preview appear here.'
-              : 'No entries match this filter.'}
-          </p>
+          <div className="console-empty">
+            <svg className="empty-icon" width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
+              <rect x="4" y="6" width="26" height="22" rx="2.5" stroke="currentColor" strokeWidth="1.4" fill="none" />
+              <path
+                d="M9 13.5 13 17l-4 3.5M15.5 21h6"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            <p>
+              {rows.length === 0
+                ? 'Console output, page errors and network requests from the preview appear here.'
+                : 'No entries match this filter.'}
+            </p>
+            {rows.length === 0 && (
+              <p className="empty-sub">Interact with the preview and events stream in live.</p>
+            )}
+          </div>
         ) : (
           visible.map((row) => {
             const isOpen = expanded.has(row.id);
             return (
-              <div
-                key={row.id}
-                style={{
-                  display: 'flex',
-                  gap: 8,
-                  alignItems: 'flex-start',
-                  padding: '4px 10px',
-                  borderBottom: '1px solid var(--border-0)',
-                  background: row.level === 'error' ? 'color-mix(in srgb, var(--err) 8%, transparent)' : undefined,
-                  fontFamily: 'var(--font-mono)',
-                }}
-              >
-                <span style={{ marginTop: 2, display: 'inline-flex' }}>
-                  <LevelIcon row={row} />
-                </span>
-                <span style={{ color: 'var(--text-2)', flexShrink: 0 }}>{formatTime(row.ts)}</span>
-                <div style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
-                  <span style={{ color: row.level === 'error' ? 'var(--err)' : row.level === 'warn' ? 'var(--warn)' : 'var(--text-0)' }}>
+              <div key={row.id} className={`console-row console-row--${row.level}`}>
+                <LevelIcon row={row} />
+                <span className="console-row-time">{formatTime(row.ts)}</span>
+                <div className="console-row-body">
+                  <span className="console-row-text">
                     {row.kind === 'network' && (
-                      <span style={{ color: 'var(--text-2)' }}>
-                        {row.method} {row.status !== undefined ? `${row.status} ` : ''}
+                      <span className="console-row-meta">
+                        {row.method}
+                        {row.status !== undefined ? ` ${row.status}` : ''}
                       </span>
                     )}
                     {row.kind === 'network' ? row.url : row.text}
                   </span>
                   {row.file && (
-                    <span style={{ color: 'var(--text-2)' }}>
-                      {' '}
+                    <span className="console-row-loc">
                       {row.file}
                       {row.line !== undefined ? `:${row.line}` : ''}
                     </span>
@@ -365,39 +351,34 @@ export function ConsoleTab({ buildId, onCountChange }: ConsoleTabProps) {
                     <>
                       <button
                         type="button"
+                        className="console-details-btn"
                         aria-expanded={isOpen}
-                        style={{ ...toolbarBtnStyle, marginLeft: 6, padding: '0 6px', fontSize: 11 }}
                         onClick={() => toggleExpanded(row.id)}
                       >
                         {isOpen ? 'Hide details' : 'Show details'}
                       </button>
-                      {isOpen && (
-                        <pre
-                          style={{
-                            margin: '4px 0 0',
-                            padding: 8,
-                            background: 'var(--bg-2)',
-                            borderRadius: 'var(--radius-s)',
-                            overflowX: 'auto',
-                            color: 'var(--text-1)',
-                            whiteSpace: 'pre-wrap',
-                          }}
-                        >
-                          {row.details}
-                        </pre>
-                      )}
+                      {isOpen && <pre className="console-details">{row.details}</pre>}
                     </>
                   )}
                 </div>
                 {row.level === 'error' && (
                   <button
                     type="button"
-                    className="btn btn--ghost btn--s"
-                    style={{ flexShrink: 0 }}
+                    className="console-fix"
                     disabled={fixingId !== null}
                     onClick={() => fixError(row)}
                   >
-                    {fixingId === row.id ? 'Sending…' : 'Fix this error'}
+                    <svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true" className="console-fix-icon">
+                      <path
+                        d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        fill="none"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    {fixingId === row.id ? 'Sending...' : 'Fix this error'}
                   </button>
                 )}
               </div>
@@ -407,15 +388,7 @@ export function ConsoleTab({ buildId, onCountChange }: ConsoleTabProps) {
       </div>
 
       {toast && (
-        <p
-          role="status"
-          style={{
-            margin: 0,
-            padding: '6px 10px',
-            borderTop: '1px solid var(--border-0)',
-            color: toast.kind === 'ok' ? 'var(--ok)' : 'var(--err)',
-          }}
-        >
+        <p role="status" className={`console-toast console-toast--${toast.kind}`}>
           {toast.text}
         </p>
       )}

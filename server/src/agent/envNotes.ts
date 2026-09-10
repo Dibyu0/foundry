@@ -23,7 +23,16 @@ export interface EnvRef {
   line: number;
 }
 
-export type SecretPatternId = 'sk-*' | 'AIza*' | 'AKIA*' | 'ghp_*';
+export type SecretPatternId =
+  | 'sk-*'
+  | 'sk_*'
+  | 'AIza*'
+  | 'AKIA*'
+  | 'ghp_*'
+  | 'github_pat_*'
+  | 'xox*'
+  | 'SG.*'
+  | 'PEM private key';
 
 export interface SecretWarning {
   file: string;
@@ -70,9 +79,20 @@ const SHELL_COMMENT_RE = /^\s*#/;
 // to locate the line - they are never copied into the report.
 const SECRET_PATTERNS: ReadonlyArray<{ id: SecretPatternId; re: RegExp }> = [
   { id: 'sk-*', re: /(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{16,}/g },
+  // Stripe secret keys (the most common key an AI builder embeds).
+  { id: 'sk_*', re: /(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}/g },
   { id: 'AIza*', re: /(?<![0-9A-Za-z_-])AIza[0-9A-Za-z_-]{20,}/g },
   { id: 'AKIA*', re: /(?<![0-9A-Z])AKIA[0-9A-Z]{16}(?![0-9A-Z])/g },
   { id: 'ghp_*', re: /(?<![A-Za-z0-9_])ghp_[A-Za-z0-9]{30,}/g },
+  // GitHub fine-grained PATs and the other token families in the gh* space.
+  { id: 'github_pat_*', re: /(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{30,}/g },
+  { id: 'ghp_*', re: /(?<![A-Za-z0-9_])gh[osr]_[A-Za-z0-9]{30,}/g },
+  // Slack bot/app/user tokens.
+  { id: 'xox*', re: /(?<![A-Za-z0-9_])xox[baprs]-[A-Za-z0-9-]{16,}/g },
+  // SendGrid keys (SG.<~22>.<~43>).
+  { id: 'SG.*', re: /(?<![A-Za-z0-9_])SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g },
+  // PEM private key headers — a fixed literal with zero false-positive risk.
+  { id: 'PEM private key', re: /-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----/g },
 ];
 
 export function emptyEnvReport(): EnvReport {

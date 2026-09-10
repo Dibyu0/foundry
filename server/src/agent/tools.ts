@@ -6,6 +6,8 @@ const MAX_OPTIONS = 8;
 const MAX_STEPS = 20;
 const MAX_STEP_FILES = 40;
 const MAX_ISSUES = 50;
+const SCAN_WORK_BUDGET_MIN = 1_048_576;
+const SCAN_WORK_BUDGET_FACTOR = 8;
 
 /**
  * Structural view of the confined site store (the real implementation lives
@@ -275,6 +277,68 @@ function toToolCall(parsed: unknown): RawToolCall | null {
   return { name: parsed.tool, args: isRecord(parsed.args) ? parsed.args : {} };
 }
 
+// A closing fence only counts at the start of a line, alone up to trailing
+// whitespace. An indexOf-anywhere closer truncates payloads whose content
+// itself contains triple backticks (markdown files), losing the tool call.
+function findClosingFence(text: string, from: number): number {
+  let idx = text.indexOf('```', from);
+  while (idx !== -1) {
+    if (idx > 0 && text[idx - 1] === '\n') {
+      let j = idx + 3;
+      while (j < text.length && (text[j] === ' ' || text[j] === '\t')) j += 1;
+      if (j >= text.length || text[j] === '\n' || text[j] === '\r') return idx;
+    }
+    idx = text.indexOf('```', idx + 3);
+  }
+  return -1;
+}
+
+export interface WriteFilePayload {
+  start: number;
+  end: number;
+  path: string;
+  chars: number;
+  args: Record<string, unknown>;
+}
+
+/**
+ * Locate every {"tool":"writeFile"} JSON object in text, returning each span
+ * and its decoded args. Drives transcript compaction in the runtime; the
+ * '"tool"' anchor keeps the scan linear even on large messages.
+ */
+export function findWriteFilePayloads(text: string): WriteFilePayload[] {
+  const out: WriteFilePayload[] = [];
+  let from = 0;
+  for (;;) {
+    const anchor = text.indexOf('"tool"', from);
+    if (anchor === -1) break;
+    let brace = anchor - 1;
+    while (brace >= 0 && (text[brace] === ' ' || text[brace] === '\t' || text[brace] === '\n' || text[brace] === '\r')) {
+      brace -= 1;
+    }
+    if (brace < 0 || text[brace] !== '{') {
+      from = anchor + 6;
+      continue;
+    }
+    const end = scanBalanced(text, brace);
+    if (end === -1) {
+      from = anchor + 6;
+      continue;
+    }
+    from = end;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text.slice(brace, end));
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed) || parsed.tool !== 'writeFile' || !isRecord(parsed.args)) continue;
+    if (typeof parsed.args.path !== 'string' || typeof parsed.args.content !== 'string') continue;
+    out.push({ start: brace, end, path: parsed.args.path, chars: parsed.args.content.length, args: parsed.args });
+  }
+  return out;
+}
+
 function looksLikeTool(raw: string): boolean {
   return raw.includes('"tool"');
 }
@@ -313,7 +377,7 @@ export function extractToolCalls(response: string): ExtractResult {
   for (;;) {
     const open = response.indexOf('```', scanFrom);
     if (open === -1) break;
-    const close = response.indexOf('```', open + 3);
+    const close = findClosingFence(response, open + 3);
     if (close === -1) break;
     const fenceInner = response.slice(open + 3, close);
     const firstNl = fenceInner.indexOf('\n');
@@ -370,12 +434,26 @@ export function extractToolCalls(response: string): ExtractResult {
   }
 
   // Bare scan over what remains (spans already consumed or noted are skipped).
-  const skipped = (idx: number): boolean =>
-    removed.some((s) => idx >= s.start && idx < s.end)
-    || notedFences.some((s) => idx >= s.start && idx < s.end);
+  const skipSpans = [...removed, ...notedFences].sort((a, b) => a.start - b.start);
+  let skipIdx = 0;
+  const skipped = (idx: number): boolean => {
+    while (skipIdx < skipSpans.length && idx >= skipSpans[skipIdx]!.end) skipIdx += 1;
+    const span = skipSpans[skipIdx];
+    return span !== undefined && idx >= span.start;
+  };
+  // Hard cap on total scanBalanced work: without it, repeated rescans of
+  // nested unbalanced starts are quadratic (40k braces took ~4s). Scaled to
+  // the response so large legit builds keep their headroom.
+  const scanBudget = Math.max(SCAN_WORK_BUDGET_MIN, response.length * SCAN_WORK_BUDGET_FACTOR);
+  let scanWork = 0;
   for (let i = 0; i < response.length; i += 1) {
     if (response[i] !== '{' || skipped(i)) continue;
     const end = scanBalanced(response, i);
+    scanWork += (end === -1 ? response.length : end) - i;
+    if (scanWork > scanBudget) {
+      notes.push('tool scan stopped early: work budget exceeded on malformed input; later calls may be missed');
+      break;
+    }
     if (end === -1) {
       if (looksLikeTool(response.slice(i))) notes.push(noteFor(response.slice(i), 'unbalanced braces'));
       continue;
@@ -388,6 +466,10 @@ export function extractToolCalls(response: string): ExtractResult {
       i = end - 1;
     } else if (malformed) {
       notes.push(noteFor(raw, 'invalid JSON'));
+      i = end - 1;
+    } else if (!raw.includes('"tool"')) {
+      // Balanced JSON with no "tool" substring can hold no call or malformed
+      // note inside; skipping the block keeps the scan linear on deep nesting.
       i = end - 1;
     }
   }

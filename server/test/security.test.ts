@@ -112,6 +112,13 @@ describe('rate limiting', () => {
         expect(blocked.headers.get('retry-after')).not.toBeNull();
         // The global 300/min limiter still lets ordinary routes through.
         expect((await fetch(`${base}/api/config`)).status).toBe(200);
+        // Let the 60 mock builds finish writing (checkpoints included)
+        // before the temp dir is removed at teardown: abort any drive still
+        // in flight, settle it, and flush every queued snapshot write.
+        const orch = foundry.app.locals.orchestrator as
+          | { shutdown(): Promise<void> }
+          | undefined;
+        await orch?.shutdown();
       });
     } finally {
       await foundry.close();

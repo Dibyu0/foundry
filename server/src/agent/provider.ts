@@ -58,6 +58,8 @@ export interface HttpProviderConfig {
   getRawConfig?: RawConfigReader;
   fetchImpl?: FetchLike;
   timeoutMs?: number;
+  /** Idle-between-chunks budget for streamed bodies; a stalled SSE stream is aborted after this. Default 45s. */
+  streamIdleTimeoutMs?: number;
   maxRetries?: number;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
@@ -66,6 +68,7 @@ export interface HttpProviderConfig {
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 45_000;
 const DEFAULT_MAX_RETRIES = 2;
 const RETRY_AFTER_CAP_MS = 30_000;
 const MAX_RETRY_AFTER_WAITS = 2;
@@ -100,6 +103,7 @@ interface Hooks {
   random: () => number;
   now: () => number;
   timeoutMs: number;
+  streamIdleTimeoutMs: number;
   maxRetries: number;
   key: string | null;
 }
@@ -109,6 +113,12 @@ interface HttpResult {
   headers: Headers;
   body: string | null;
   stream: ReadableStream<Uint8Array> | null;
+  /**
+   * Streaming results only: releases the caller-abort wiring once the body
+   * is consumed, tearing the socket down when the read ended early. A no-op
+   * for the connection after a complete read.
+   */
+  releaseStream?: () => void;
 }
 
 async function readBodyCapped(stream: ReadableStream<Uint8Array>, cap: number): Promise<string> {
@@ -191,6 +201,10 @@ async function postJson(h: Hooks, url: string, payload: unknown, callerSignal?: 
     }, h.timeoutMs);
     const onCallerAbort = () => controller.abort();
     callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
+    // Set once a streamed body is handed to the consumer: the caller-abort
+    // listener then stays wired until releaseStream runs, so an abort still
+    // reaches the socket while the body is being read.
+    let streamHandedOff = false;
     try {
       const res = await h.fetchImpl(url, {
         method: 'POST',
@@ -199,13 +213,30 @@ async function postJson(h: Hooks, url: string, payload: unknown, callerSignal?: 
         signal: controller.signal,
       });
       if (res.status >= 200 && res.status < 300) {
-        const isStream = res.body !== null && payload !== null && typeof payload === 'object'
+        const body = res.body;
+        const isStream = body !== null && payload !== null && typeof payload === 'object'
           && (payload as { stream?: unknown }).stream === true;
+        if (isStream) {
+          // Headers are in: the request timeout has done its job and the
+          // idle-between-chunks timeout in parseSseLines guards the body.
+          streamHandedOff = true;
+          clearTimeout(timer);
+          return {
+            status: res.status,
+            headers: res.headers,
+            body: null,
+            stream: body,
+            releaseStream: () => {
+              callerSignal?.removeEventListener('abort', onCallerAbort);
+              controller.abort();
+            },
+          };
+        }
         return {
           status: res.status,
           headers: res.headers,
-          body: isStream ? null : await res.text(),
-          stream: isStream ? res.body : null,
+          body: await res.text(),
+          stream: null,
         };
       }
       const rawBody = res.body !== null
@@ -231,28 +262,58 @@ async function postJson(h: Hooks, url: string, payload: unknown, callerSignal?: 
       throw lastError;
     } finally {
       clearTimeout(timer);
-      callerSignal?.removeEventListener('abort', onCallerAbort);
+      if (!streamHandedOff) callerSignal?.removeEventListener('abort', onCallerAbort);
     }
   }
   throw lastError ?? new ProviderError('request failed');
 }
 
+export interface StreamReadOptions {
+  /** Caller abort: cancels the read and fails with AbortError. */
+  signal?: AbortSignal;
+  /** Fails the stream when no chunk arrives within this budget. */
+  idleTimeoutMs?: number;
+}
+
 /**
  * Incremental SSE line splitter: byte-chunk safe (StringDecoder) and tolerant
  * of a CRLF split across chunks. onLine receives each line without its
- * terminator; blank lines are delivered too (the caller ignores them).
+ * terminator; blank lines are delivered too (the caller ignores them). With
+ * opts, a caller abort cancels the read (AbortError) and an idle gap beyond
+ * idleTimeoutMs fails the stream instead of waiting on a stalled body forever.
  */
 export async function parseSseLines(
   stream: ReadableStream<Uint8Array>,
   onLine: (line: string) => void,
+  opts?: StreamReadOptions,
 ): Promise<void> {
   const reader = stream.getReader();
   const decoder = new StringDecoder('utf8');
   let buffer = '';
+  let idleTimedOut = false;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const idleMs = opts?.idleTimeoutMs;
+  const armIdleTimer = (): void => {
+    if (idleMs === undefined || idleMs <= 0) return;
+    clearTimeout(idleTimer);
+    const timer = setTimeout(() => {
+      idleTimedOut = true;
+      void reader.cancel().catch(() => undefined);
+    }, idleMs);
+    // A stalled stream must not pin the event loop on its own.
+    if (typeof timer.unref === 'function') timer.unref();
+    idleTimer = timer;
+  };
+  const onCallerAbort = (): void => {
+    void reader.cancel().catch(() => undefined);
+  };
+  opts?.signal?.addEventListener('abort', onCallerAbort, { once: true });
+  armIdleTimer();
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      armIdleTimer();
       if (!value || value.length === 0) continue;
       buffer += decoder.write(value);
       let nl: number;
@@ -263,12 +324,22 @@ export async function parseSseLines(
         onLine(line);
       }
     }
+    // A cancel surfaces as a clean done, so the flags decide whether the
+    // stream truly finished before the tail is delivered as a final line.
+    if (opts?.signal?.aborted) throw new AbortError();
+    if (idleTimedOut) throw new ProviderError(`stream stalled: no data for ${idleMs}ms`);
     buffer += decoder.end();
     if (buffer.length > 0) {
       if (buffer.endsWith('\r')) buffer = buffer.slice(0, -1);
       onLine(buffer);
     }
+  } catch (e) {
+    // The socket aborting mid-read rejects read(); report the caller's abort.
+    if (opts?.signal?.aborted) throw new AbortError();
+    throw e;
   } finally {
+    clearTimeout(idleTimer);
+    opts?.signal?.removeEventListener('abort', onCallerAbort);
     reader.releaseLock();
   }
 }
@@ -276,6 +347,7 @@ export async function parseSseLines(
 async function readSseData(
   stream: ReadableStream<Uint8Array>,
   onData: (payload: string) => void,
+  opts?: StreamReadOptions,
 ): Promise<void> {
   let sawDone = false;
   await parseSseLines(stream, (line) => {
@@ -286,8 +358,10 @@ async function readSseData(
       return;
     }
     onData(payload);
-  });
-  void sawDone;
+  }, opts);
+  // A clean FIN without the terminal sentinel means the connection dropped
+  // mid-generation; the partial text must not pass for a complete answer.
+  if (!sawDone) throw new ProviderError('stream ended before the completion marker');
 }
 
 async function resolveDefaultKey(): Promise<string | null> {
@@ -496,6 +570,7 @@ export function createKimiProvider(config: HttpProviderConfig = {}): Provider {
     random: config.random ?? Math.random,
     now: config.now ?? Date.now,
     timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    streamIdleTimeoutMs: config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
   };
 
@@ -543,19 +618,23 @@ export function createKimiProvider(config: HttpProviderConfig = {}): Provider {
       const res = await postJson(h, url, payload(messages, true, opts, await readRaw()), opts?.signal);
       if (!res.stream) throw new ProviderError('malformed response: missing stream');
       let full = '';
-      await readSseData(res.stream, (data) => {
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(data);
-        } catch {
-          throw new ProviderError(`malformed stream chunk: ${truncate(scrub(data, [h.key]), ERROR_BODY_MAX)}`);
-        }
-        const delta = extractChoiceContent(parsed, true);
-        if (delta) {
-          full += delta;
-          onDelta(delta);
-        }
-      });
+      try {
+        await readSseData(res.stream, (data) => {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(data);
+          } catch {
+            throw new ProviderError(`malformed stream chunk: ${truncate(scrub(data, [h.key]), ERROR_BODY_MAX)}`);
+          }
+          const delta = extractChoiceContent(parsed, true);
+          if (delta) {
+            full += delta;
+            onDelta(delta);
+          }
+        }, { signal: opts?.signal, idleTimeoutMs: h.streamIdleTimeoutMs });
+      } finally {
+        res.releaseStream?.();
+      }
       return full;
     },
   };
@@ -575,6 +654,7 @@ export function createOllamaProvider(config: HttpProviderConfig = {}): Provider 
     random: config.random ?? Math.random,
     now: config.now ?? Date.now,
     timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    streamIdleTimeoutMs: config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
     key: null,
   };
@@ -624,27 +704,36 @@ export function createOllamaProvider(config: HttpProviderConfig = {}): Provider 
       const res = await postJson(base, url, payload(messages, true, opts, await readRaw()), opts?.signal);
       if (!res.stream) throw new ProviderError('malformed response: missing stream');
       let full = '';
-      await parseSseLines(res.stream, (line) => {
-        if (line.trim() === '') return;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(line);
-        } catch {
-          throw new ProviderError(`malformed stream chunk: ${truncate(line, ERROR_BODY_MAX)}`);
-        }
-        const err = (parsed as { error?: unknown } | null)?.error;
-        if (typeof err === 'string' && err !== '') {
-          throw new ProviderError(`ollama error: ${truncate(err, ERROR_BODY_MAX)}`);
-        }
-        const message = (parsed as { message?: unknown } | null)?.message;
-        const delta = message && typeof message === 'object'
-          ? (message as { content?: unknown }).content
-          : undefined;
-        if (typeof delta === 'string' && delta !== '') {
-          full += delta;
-          onDelta(delta);
-        }
-      });
+      let sawDone = false;
+      try {
+        await parseSseLines(res.stream, (line) => {
+          if (line.trim() === '') return;
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            throw new ProviderError(`malformed stream chunk: ${truncate(line, ERROR_BODY_MAX)}`);
+          }
+          const err = (parsed as { error?: unknown } | null)?.error;
+          if (typeof err === 'string' && err !== '') {
+            throw new ProviderError(`ollama error: ${truncate(err, ERROR_BODY_MAX)}`);
+          }
+          if ((parsed as { done?: unknown } | null)?.done === true) sawDone = true;
+          const message = (parsed as { message?: unknown } | null)?.message;
+          const delta = message && typeof message === 'object'
+            ? (message as { content?: unknown }).content
+            : undefined;
+          if (typeof delta === 'string' && delta !== '') {
+            full += delta;
+            onDelta(delta);
+          }
+        }, { signal: opts?.signal, idleTimeoutMs: base.streamIdleTimeoutMs });
+      } finally {
+        res.releaseStream?.();
+      }
+      // Same contract as the chat-completions sentinel: a FIN without
+      // done:true means the connection dropped mid-generation.
+      if (!sawDone) throw new ProviderError('stream ended before the completion marker');
       return full;
     },
   };

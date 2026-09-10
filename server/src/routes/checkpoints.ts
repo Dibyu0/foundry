@@ -34,6 +34,17 @@ export interface CheckpointServiceLike {
 /** The build-registry read surface this router needs (the Orchestrator satisfies it). */
 export interface BuildRegistryLike {
   get(id: string): { phase: string } | undefined;
+  /**
+   * Optional: resolves once the build's current drive (if any) has fully
+   * stopped. Awaited before restore so no drive can write mid-swap.
+   */
+  whenSettled?(id: string): Promise<void>;
+  /**
+   * Optional: reconciles the build's recorded files with the store on disk,
+   * returning the live file list. Called after a restore so GET /:id reflects
+   * the restored files; registries lacking it keep their stale record.
+   */
+  rescanFiles?(id: string): Promise<unknown>;
 }
 
 export interface CheckpointsRouterDeps {
@@ -43,7 +54,7 @@ export interface CheckpointsRouterDeps {
   builds: BuildRegistryLike;
   /** Checkpoint service (server/src/agent/checkpoints.ts). */
   service: CheckpointServiceLike;
-  /** Shared SSE hub; restore re-emits the current phase so clients refresh. */
+  /** Shared SSE hub; restore emits 'restored' plus the current phase so clients refresh. */
   hub: Pick<SseHub, 'send'>;
 }
 
@@ -119,9 +130,12 @@ function toCheckpointInfo(raw: unknown): CheckpointInfo | null {
  *
  *   app.use('/api/builds', createCheckpointsRouter({ sitesRoot, builds: orchestrator, service, hub }));
  *
- * Restore calls the checkpoint service directly with the sites store and then
- * re-emits the build's current phase through the hub itself (the orchestrator
- * is not involved in the restore), so connected clients refetch state and files.
+ * Restore waits for any in-flight drive to settle (re-checking the phase
+ * afterwards, since a parked build may have started meanwhile), calls the
+ * checkpoint service directly with the sites store, asks the registry to
+ * rescan the restored files when it supports that, and emits a 'restored'
+ * event plus the build's current phase through the hub so connected clients
+ * refetch state and files.
  */
 export function createCheckpointsRouter(deps: CheckpointsRouterDeps): Router {
   const { sitesRoot, builds, service, hub } = deps;
@@ -150,13 +164,27 @@ export function createCheckpointsRouter(deps: CheckpointsRouterDeps): Router {
       if (ACTIVE_PHASES.has(state.phase)) {
         throw new ApiError(409, `cannot restore a checkpoint while the build is ${state.phase.toLowerCase()}`);
       }
+      // The gate above is stale the moment it passes: a parked build can be
+      // approved and start driving while the async restore runs. Wait for
+      // any in-flight drive to settle, then re-check before swapping files.
+      await builds.whenSettled?.(id);
+      const settled = builds.get(id);
+      if (settled !== undefined && ACTIVE_PHASES.has(settled.phase)) {
+        throw new ApiError(409, `cannot restore a checkpoint while the build is ${settled.phase.toLowerCase()}`);
+      }
       const restored = await service.restore(sitesRoot, id, n);
       if (restored === null) throw new ApiError(404, `unknown checkpoint ${n} for build ${id}`);
       const checkpoint = toCheckpointInfo(restored);
       if (checkpoint === null) throw new Error('checkpoint service returned a malformed checkpoint');
+      // The restore rewrote the store behind the registry's back; rescan so
+      // the build record (and GET /:id) reflects the restored files.
+      await builds.rescanFiles?.(id);
       // Re-read the phase after the restore: it cannot have left a terminal
       // state, but a parked INTAKE build may have moved on concurrently.
       const phase = builds.get(id)?.phase ?? state.phase;
+      // A distinct 'restored' event reaches clients even when the build's
+      // channel was dropped or a same-phase echo would be deduped away.
+      hub.send(id, { type: 'restored', id, checkpoint: checkpoint.n });
       hub.send(id, { type: 'phase', phase });
       res.json({ ok: true, restored: checkpoint.n, checkpoint });
     }),

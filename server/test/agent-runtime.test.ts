@@ -7,11 +7,12 @@ import {
   ProviderError,
 } from '../src/agent/provider.js';
 import type { ChatMessage, Provider } from '../src/agent/provider.js';
-import { createRuntime } from '../src/agent/runtime.js';
+import { compactTranscript, createRuntime } from '../src/agent/runtime.js';
 import type { AgentEvent } from '../src/agent/runtime.js';
 import {
   executeFsTool,
   extractToolCalls,
+  findWriteFilePayloads,
   validateAskArgs,
   validatePath,
   validatePlanArgs,
@@ -165,6 +166,60 @@ describe('tool extraction', () => {
     const res = extractToolCalls('Use a { b } block and {"not":"a tool"} here.');
     expect(res.calls).toEqual([]);
     expect(res.notes).toEqual([]);
+  });
+});
+
+describe('extraction robustness', () => {
+  it('extracts a fenced writeFile call whose markdown content contains code fences', () => {
+    const md = '# Guide\n\n```js\nconsole.log(1)\n```\n\n```css\nbody { color: red }\n```\n\ndone';
+    const res = extractToolCalls(`\`\`\`json\n${toolCall('writeFile', { path: 'README.md', content: md })}\n\`\`\``);
+    expect(res.calls).toHaveLength(1);
+    expect(res.calls[0]!.name).toBe('writeFile');
+    expect(res.calls[0]!.args.content).toBe(md);
+    expect(res.notes).toEqual([]);
+    expect(res.text).toBe('');
+  });
+
+  it('extracts a bare writeFile call whose content contains code fences', () => {
+    const md = 'intro ```js\ncode()\n``` outro';
+    const res = extractToolCalls(toolCall('writeFile', { path: 'a.md', content: md }));
+    expect(res.calls).toHaveLength(1);
+    expect(res.calls[0]!.args.content).toBe(md);
+    expect(res.notes).toEqual([]);
+  });
+
+  it('still treats a fence closer with trailing spaces as a closer', () => {
+    const res = extractToolCalls(`\`\`\`json\n${toolCall('finish', { summary: 's' })}\n\`\`\`  \nafter`);
+    expect(res.calls.map((c) => c.name)).toEqual(['finish']);
+    expect(res.text).toBe('after');
+  });
+
+  it('caps scan work on deep unbalanced braces with an honest note', () => {
+    const junk = `{"tool":"writeFile","args":${'{'.repeat(40_000)}`;
+    const started = performance.now();
+    const res = extractToolCalls(`pre ${junk}`);
+    const elapsed = performance.now() - started;
+    expect(elapsed).toBeLessThan(100);
+    expect(res.calls).toEqual([]);
+    expect(res.notes.some((n) => n.includes('work budget exceeded'))).toBe(true);
+    expect(res.notes.some((n) => n.includes('unbalanced braces'))).toBe(true);
+  });
+
+  it('skips deep balanced non-tool JSON without tripping the budget or losing later calls', () => {
+    let deep = '"leaf"';
+    for (let i = 0; i < 5_000; i += 1) deep = `{"k":${deep}}`;
+    const started = performance.now();
+    const res = extractToolCalls(`prose ${deep} ${toolCall('finish', { summary: 's' })}`);
+    const elapsed = performance.now() - started;
+    expect(elapsed).toBeLessThan(100);
+    expect(res.calls.map((c) => c.name)).toEqual(['finish']);
+    expect(res.notes).toEqual([]);
+    expect(res.text).toContain('prose');
+  });
+
+  it('still recovers a valid call following an unbalanced brace region', () => {
+    const res = extractToolCalls(`{"a": "}{"} ${toolCall('finish', { summary: 'ok' })}`);
+    expect(res.calls.map((c) => c.name)).toEqual(['finish']);
   });
 });
 
@@ -466,6 +521,160 @@ describe('agent runtime', () => {
     const r = await rt.run([{ role: 'user', content: 'x' }], { onEvent });
     expect(r.status).toBe('finished');
     expect(events.some((e) => e.type === 'tool' && e.result === 'error: unknown tool "nuke"')).toBe(true);
+  });
+});
+
+describe('transcript compaction', () => {
+  it('findWriteFilePayloads locates spans and decoded args', () => {
+    const call = toolCall('writeFile', { path: 'x.css', content: 'ab' });
+    const text = `pre ${call} mid ${toolCall('listFiles', {})} post`;
+    const spans = findWriteFilePayloads(text);
+    expect(spans).toHaveLength(1);
+    expect(spans[0]!.path).toBe('x.css');
+    expect(spans[0]!.chars).toBe(2);
+    expect(text.slice(spans[0]!.start, spans[0]!.end)).toBe(call);
+  });
+
+  it('leaves short transcripts without writeFile payloads untouched', () => {
+    const messages: ChatMessage[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'build' },
+      { role: 'assistant', content: 'hello' },
+      { role: 'tool', content: '[listFiles] a.css' },
+      { role: 'assistant', content: 'working' },
+    ];
+    const before = messages.map((m) => m.content);
+    expect(compactTranscript(messages, 120_000)).toEqual({ stubbed: 0, dropped: 0 });
+    expect(messages.map((m) => m.content)).toEqual(before);
+  });
+
+  it('stubs older writeFile payloads, keeping valid JSON with path and char count', () => {
+    const messages: ChatMessage[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'build' },
+      { role: 'assistant', content: `intro ${toolCall('writeFile', { path: 'a.css', content: 'a'.repeat(5000) })} outro` },
+      { role: 'tool', content: '[writeFile] ok: wrote a.css (5000 bytes)' },
+      { role: 'assistant', content: 'latest' },
+      { role: 'tool', content: '[listFiles] a.css' },
+    ];
+    expect(compactTranscript(messages, 120_000)).toEqual({ stubbed: 1, dropped: 0 });
+    const m = messages[2]!;
+    expect(m.content.startsWith('intro ')).toBe(true);
+    expect(m.content.endsWith(' outro')).toBe(true);
+    const json = m.content.slice('intro '.length, m.content.length - ' outro'.length);
+    const parsed = JSON.parse(json) as { tool: string; args: { path: string; content: string } };
+    expect(parsed.tool).toBe('writeFile');
+    expect(parsed.args.path).toBe('a.css');
+    expect(parsed.args.content).toBe('<written: a.css (5000 chars)>');
+    // idempotent: a second pass leaves the stub alone
+    expect(compactTranscript(messages, 120_000)).toEqual({ stubbed: 0, dropped: 0 });
+    expect(messages[2]!.content).toBe(m.content);
+  });
+
+  it('caps total chars by tombstoning the oldest assistant/tool payloads first', () => {
+    const messages: ChatMessage[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'build the site' },
+      { role: 'assistant', content: toolCall('writeFile', { path: 'a.css', content: 'a'.repeat(2000) }) },
+      { role: 'tool', content: `[readFile] ${'r'.repeat(2000)}` },
+      { role: 'assistant', content: 'latest reply' },
+      { role: 'tool', content: '[listFiles] a.css' },
+    ];
+    const r = compactTranscript(messages, 300);
+    expect(r).toEqual({ stubbed: 1, dropped: 2 });
+    expect(messages[0]!.content).toBe('sys');
+    expect(messages[1]!.content).toBe('build the site');
+    expect(messages[2]!.content).toMatch(/^<dropped: assistant payload \(\d+ chars\)>$/);
+    expect(messages[3]!.content).toMatch(/^<dropped: \[readFile\] result \(\d+ chars\)>$/);
+    expect(messages[4]!.content).toBe('latest reply');
+    expect(messages[5]!.content).toBe('[listFiles] a.css');
+    const total = messages.reduce((n, m) => n + m.content.length, 0);
+    expect(total).toBeLessThanOrEqual(300);
+  });
+
+  it('is best-effort when the protected tail alone exceeds the budget', () => {
+    const messages: ChatMessage[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'u' },
+      { role: 'tool', content: '[listFiles] a.css' },
+      { role: 'assistant', content: 'x'.repeat(500) },
+      { role: 'tool', content: 'y'.repeat(500) },
+    ];
+    const r = compactTranscript(messages, 50);
+    // the only eligible message is smaller than its own tombstone: left alone
+    expect(r).toEqual({ stubbed: 0, dropped: 0 });
+    expect(messages[2]!.content).toBe('[listFiles] a.css');
+    expect(messages[3]!.content).toHaveLength(500);
+    expect(messages[4]!.content).toHaveLength(500);
+  });
+
+  it('stubs older payloads during a run while protecting the live exchange', async () => {
+    const store = memoryStore();
+    const provider = scriptedProvider([
+      toolCall('writeFile', { path: 'one.css', content: 'a'.repeat(5000) }),
+      toolCall('writeFile', { path: 'two.css', content: 'b'.repeat(5000) }),
+      toolCall('finish', { summary: 'done' }),
+    ]);
+    const rt = createRuntime({ provider, store });
+    const messages: ChatMessage[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'build' },
+    ];
+    const r = await rt.run(messages);
+    expect(r.status).toBe('finished');
+    // 0 sys, 1 user, 2 assistant wf1, 3 tool r1, 4 assistant wf2, 5 tool r2, 6 finish
+    const first = JSON.parse(messages[2]!.content) as { args: { path: string; content: string } };
+    expect(first.args.content).toBe('<written: one.css (5000 chars)>');
+    expect(messages[3]!.content).toBe('[writeFile] ok: wrote one.css (5000 bytes)');
+    expect(messages[4]!.content).toContain('b'.repeat(5000));
+    expect(messages[5]!.content).toBe('[writeFile] ok: wrote two.css (5000 bytes)');
+    expect(store.files.get('one.css')).toHaveLength(5000);
+    expect(store.files.get('two.css')).toHaveLength(5000);
+    // the stub is what the provider was actually sent on the following turn
+    expect(provider.calls[2]![2]!.content).toBe(messages[2]!.content);
+  });
+
+  it('does not double-stub when a run resumes on the same transcript', async () => {
+    const store = memoryStore();
+    const provider = scriptedProvider([
+      toolCall('writeFile', { path: 'one.css', content: 'a'.repeat(3000) }),
+      toolCall('writeFile', { path: 'two.css', content: 'b'.repeat(3000) }),
+      toolCall('finish', { summary: 'done' }),
+    ]);
+    const rt = createRuntime({ provider, store });
+    const messages: ChatMessage[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'build' },
+    ];
+    await rt.run(messages);
+    const stubBefore = messages[2]!.content;
+    messages.push({ role: 'user', content: 'looks good, continue' });
+    const rt2 = createRuntime({ provider: scriptedProvider([toolCall('finish', { summary: 'again' })]), store });
+    await rt2.run(messages);
+    expect(messages[2]!.content).toBe(stubBefore);
+    const second = JSON.parse(messages[4]!.content) as { args: { content: string } };
+    expect(second.args.content).toBe('<written: two.css (3000 chars)>');
+  });
+
+  it('emits a note and drops the oldest payloads when the transcript exceeds the budget', async () => {
+    const store = memoryStore();
+    const provider = scriptedProvider([
+      toolCall('writeFile', { path: 'one.css', content: 'a'.repeat(2000) }),
+      toolCall('writeFile', { path: 'two.css', content: 'b'.repeat(2000) }),
+      toolCall('finish', { summary: 'done' }),
+    ]);
+    const { events, onEvent } = collector();
+    const rt = createRuntime({ provider, store });
+    const messages: ChatMessage[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'build' },
+    ];
+    const r = await rt.run(messages, { maxTranscriptChars: 500, onEvent });
+    expect(r.status).toBe('finished');
+    expect(messages[0]!.content).toBe('sys');
+    expect(messages[2]!.content).toMatch(/^<dropped: assistant payload \(\d+ chars\)>$/);
+    expect(messages[4]!.content).toContain('b'.repeat(2000));
+    expect(events.some((e) => e.type === 'note' && e.message.includes('dropped'))).toBe(true);
   });
 });
 

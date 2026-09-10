@@ -10,11 +10,24 @@ interface PlanViewProps {
   onApprove: (plan: Plan) => void;
 }
 
+/** Server steps also carry id/detail (web/src/types.ts PlanStep omits them);
+ *  they must survive editing so approving a plan does not strip them. */
+interface PlanStepWire extends PlanStep {
+  id?: string;
+  detail?: string;
+}
+
 export function clonePlan(plan: Plan): Plan {
   return {
     summary: plan.summary,
     designDirection: plan.designDirection,
-    steps: plan.steps.map((s) => ({ title: s.title, files: [...s.files], done: s.done })),
+    steps: plan.steps.map((s) => {
+      const wire = s as PlanStepWire;
+      const step: PlanStepWire = { title: s.title, files: [...s.files], done: s.done };
+      if (typeof wire.id === 'string') step.id = wire.id;
+      if (typeof wire.detail === 'string') step.detail = wire.detail;
+      return step;
+    }),
   };
 }
 

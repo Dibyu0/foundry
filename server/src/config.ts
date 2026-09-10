@@ -147,7 +147,9 @@ export async function readConfig(root: string): Promise<FoundryConfig> {
     throw err;
   }
   const config = parseConfig(raw, configFile);
-  configCache.set(root, config);
+  // Never clobber a value that a concurrent writeConfig cached while this
+  // read was in flight — the writer's value is always newer.
+  if (!configCache.has(root)) configCache.set(root, config);
   return copyConfig(config);
 }
 
@@ -186,7 +188,9 @@ export async function readKey(root: string): Promise<string> {
   } catch {
     throw new ConfigError(`secrets file ${secretsFile} is not valid JSON`);
   }
-  keyCache.set(root, key);
+  // Same rule as readConfig: a concurrent writeKey's cache wins over this
+  // in-flight read.
+  if (!keyCache.has(root)) keyCache.set(root, key);
   return key;
 }
 

@@ -127,7 +127,7 @@ describe('plan model', () => {
     });
     expect(edited.summary).toBe('current summary');
     expect(edited.designNotes).toBe('light');
-    expect(edited.steps).toEqual([{ id: 'step-1', title: 'Edited step', detail: 'Edited step', files: ['app.js'] }]);
+    expect(edited.steps).toEqual([{ id: 's1', title: 'Edited step', detail: 'd', files: ['app.js'] }]);
     expect(applyPlanEdits(current, null)).toBe(current);
     expect(applyPlanEdits(current, { steps: 'nope' }).steps).toBe(current.steps);
   });
@@ -187,11 +187,14 @@ describe('orchestrator lifecycle (real mock provider, real store, real hub)', ()
     expect((await readSiteFile(w.sitesRoot, id, 'styles.css')).toString('utf8')).toContain(':root');
     expect((await readSiteFile(w.sitesRoot, id, 'index.html')).toString('utf8')).toContain('<main');
 
-    // The mock reviewer reported one issue, so the builder made a fix pass.
-    expect(state?.issues?.length).toBe(1);
-    expect(state?.issues?.[0]?.severity).toBe('warn');
+    // The mock reviewer reported one issue and the builder made a fix pass;
+    // a finished build clears the findings (resolved issues are not open).
+    expect(state?.issues).toBeUndefined();
     const acts = activities(eventsFor(w.events, id));
     expect(acts.some((a) => a.role === 'builder' && a.state === 'active' && a.note?.includes('fixing'))).toBe(true);
+    // The review event stream still carries the finding before it clears.
+    const reviewEvents = eventsFor(w.events, id).filter((e) => e.type === 'review');
+    expect(reviewEvents.length).toBeGreaterThanOrEqual(1);
 
     const types = eventTypes(w.events, id);
     expect(types.filter((t) => t === 'question').length).toBe(2);

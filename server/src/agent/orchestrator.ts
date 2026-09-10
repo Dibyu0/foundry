@@ -17,6 +17,7 @@ import {
   applyPlanEdits,
   normalizePlan,
   planFiles,
+  planPages,
   sanitizeSitePath,
   toClientPlan,
   type BuildPlan,
@@ -459,6 +460,23 @@ export class Orchestrator {
           text: 'The edit was interrupted by a server restart; some edited files may be only partially applied.',
           ts: o.now(),
         });
+      } else if (
+        b.phase === 'INTAKE' &&
+        b.pendingQuestion === undefined &&
+        b.qaLog.length === 0 &&
+        b.plan === undefined
+      ) {
+        // Never started (was only waiting for a free slot): resume it instead
+        // of destroying the brief as 'interrupted'.
+        b.messages.push({
+          role: 'system',
+          text: 'The server restarted; resuming the queued build.',
+          ts: o.now(),
+        });
+        o.builds.set(b.id, b);
+        o.persist(b);
+        o.activate(b.id);
+        continue;
       } else if (midFlight) {
         b.phase = 'ERROR';
         b.error = 'interrupted by server restart';
@@ -526,6 +544,18 @@ export class Orchestrator {
     return b === undefined ? undefined : this.toState(b);
   }
 
+  /**
+   * Reconciles a build's file list with the store on disk (used by the
+   * checkpoint-restore route so GET /:id reflects restored files). Emits
+   * the normal file events and persists; returns the live list.
+   */
+  async rescanFiles(id: string): Promise<FileEntry[]> {
+    const b = this.mustGet(id);
+    await this.syncFiles(b);
+    this.persist(b);
+    return b.files.map((f) => ({ ...f }));
+  }
+
   answer(id: string, questionId: string, answerInput: string): BuildState {
     const b = this.mustGet(id);
     const text = typeof answerInput === 'string' ? answerInput.trim() : '';
@@ -584,6 +614,8 @@ export class Orchestrator {
     b.pendingQuestion = undefined;
     b.questionQueue = [];
     b.phase = 'CANCELLED';
+    // A mid-flight role must not spin "active" forever on the timeline.
+    if (b.currentRole !== undefined) this.activity(b, b.currentRole, 'error', 'cancelled');
     this.emit(b, { type: 'phase', phase: 'CANCELLED' });
     this.pushMessage(b, { role: 'system', text: 'Build cancelled.' });
     this.persist(b);
@@ -850,7 +882,31 @@ export class Orchestrator {
     this.throwIfStopped(b);
     this.throwIfPaused(b);
     const pair: Array<{ role: 'copy' | 'builder'; run: Promise<void> }> = [];
-    if (!onDisk.has('index.html')) {
+    // Multipage builds: every planned page is a copy deliverable, not just
+    // index.html — otherwise the loop exits after the first page lands and
+    // the nav links point at files that never get written.
+    const pages = b.plan !== undefined ? planPages(b.plan) : [];
+    const copyTargets = pages.length > 1 ? pages.filter((p) => !onDisk.has(p)) : [];
+    if (copyTargets.length > 0) {
+      this.activity(b, 'copy', 'active', `writing ${copyTargets.length} page(s)`);
+      pair.push({
+        role: 'copy',
+        run: (async () => {
+          b.currentRole = 'copy';
+          try {
+            await this.agentLoop(b, 'copy', {
+              prompt: copyPrompt(this.roleContext(b)),
+              kickoff: `Write every planned page now (${copyTargets.join(', ')}), one complete file per page, then finish.`,
+              provider,
+              maxTurns: 8 + copyTargets.length * 2,
+              requiredFiles: copyTargets,
+            });
+          } finally {
+            b.currentRole = undefined;
+          }
+        })(),
+      });
+    } else if (!onDisk.has('index.html')) {
       this.activity(b, 'copy', 'active', 'writing index.html');
       pair.push({
         role: 'copy',
@@ -993,12 +1049,19 @@ export class Orchestrator {
       });
       this.activity(b, 'builder', 'done');
       b.currentRole = undefined;
+      // The fix pass consumed the findings; a finished build must not keep
+      // rendering them as open issues.
+      b.issues = undefined;
+      this.emit(b, { type: 'review', issues: [] });
     }
 
     b.siteUrl = `${this.previewBase}/${encodeURIComponent(b.id)}/`;
     this.pushMessage(b, { role: 'system', text: 'Build complete — the preview is live.' });
     await this.scanEnvNotes(b);
     await this.snapshotCheckpoint(b, 'initial build');
+    // A pause requested during the final I/O window is moot — the work is
+    // done; completing with paused:true would wedge resume/pause/edit.
+    b.paused = false;
     this.setPhase(b, 'DONE');
     this.emit(b, { type: 'done', siteUrl: b.siteUrl });
     this.persist(b);
@@ -1137,6 +1200,8 @@ export class Orchestrator {
           b.currentRole = undefined;
         }
         this.activity(b, 'builder', 'done');
+        b.issues = undefined;
+        this.emit(b, { type: 'review', issues: [] });
       }
     }
     this.emit(b, {
@@ -1147,6 +1212,7 @@ export class Orchestrator {
     if (touched.length > 0) {
       this.pushMessage(b, { role: 'system', text: 'Edit complete — the preview is up to date.' });
     }
+    b.paused = false;
     this.setPhase(b, 'DONE');
     this.emit(b, { type: 'done', siteUrl: this.siteUrlFor(b) });
   }
@@ -1205,6 +1271,7 @@ export class Orchestrator {
       checkpoint: { kind: 'fix', message: work.message, files: touched, at: this.now() },
     });
     await this.snapshotCheckpoint(b, `fix: ${work.message}`);
+    b.paused = false;
     this.setPhase(b, 'DONE');
     this.emit(b, { type: 'done', siteUrl: this.siteUrlFor(b) });
   }

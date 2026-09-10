@@ -47,11 +47,23 @@ function portFrom(value: string | undefined, fallback: number): number {
   return port;
 }
 
-function listen(server: http.Server | https.Server, port: number): Promise<void> {
+function listen(server: http.Server | https.Server, port: number, host: string): Promise<void> {
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, () => resolve());
+    server.listen(port, host, () => resolve());
   });
+}
+
+/**
+ * Bind host for both listeners. Loopback is the default on purpose: the API
+ * is unauthenticated and holds provider keys + endpoint settings, so binding
+ * all interfaces would let any LAN peer redirect provider traffic (and the
+ * key) through their host. Set FOUNDRY_HOST (e.g. 0.0.0.0) to expose
+ * deliberately — the log line then says so honestly.
+ */
+function bindHost(): string {
+  const host = process.env.FOUNDRY_HOST?.trim();
+  return host === undefined || host === '' ? '127.0.0.1' : host;
 }
 
 export async function createServer(opts: ServerOptions = {}): Promise<FoundryServer> {
@@ -72,6 +84,9 @@ export async function createServer(opts: ServerOptions = {}): Promise<FoundrySer
   const hub = new SseHub();
   // Consumed by the orchestration routes (agent workstream).
   app.locals.sseHub = hub;
+  // Published for the lazily-initialized routers (agent/enhance), which read
+  // app.locals.dataRoot rather than re-deriving it.
+  app.locals.dataRoot = dataRoot;
 
   app.use(requestId());
   app.use(appShellHeaders());
@@ -163,17 +178,23 @@ export async function createServer(opts: ServerOptions = {}): Promise<FoundrySer
   let httpServer: http.Server | null = null;
 
   if (opts.listen) {
+    const host = bindHost();
     const certs = await ensureCerts(dirs.certs);
     httpsServer = https.createServer({ key: certs.key, cert: certs.cert }, app);
-    await listen(httpsServer, httpsPort);
+    await listen(httpsServer, httpsPort, host);
 
     httpServer = http.createServer((req, res) => {
-      const host = (req.headers.host ?? 'localhost').split(':')[0];
-      const location = `https://${host}:${httpsPort}${req.url ?? '/'}`;
+      const reqHost = (req.headers.host ?? 'localhost').split(':')[0];
+      const location = `https://${reqHost}:${httpsPort}${req.url ?? '/'}`;
       res.writeHead(301, { Location: location, 'Content-Type': 'text/plain; charset=utf-8' });
       res.end(`Moved permanently: ${location}`);
     });
-    await listen(httpServer, httpPort);
+    await listen(httpServer, httpPort, host);
+
+    log(`Foundry listening at https://localhost:${httpsPort}`);
+    if (host !== '127.0.0.1' && host !== '::1') {
+      log(`WARNING: bound to ${host} — the unauthenticated API (config, keys, builds) is reachable from other hosts`);
+    }
 
     log(`Foundry listening at https://localhost:${httpsPort}`);
     log('Dev certificate is self-signed: the browser will warn once. Proceed past the warning, or import');

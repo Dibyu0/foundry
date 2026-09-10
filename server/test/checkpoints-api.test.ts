@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createCheckpointService } from '../src/agent/checkpoints.js';
 import {
   createCheckpointsRouter,
+  type BuildRegistryLike,
   type CheckpointInfo,
   type CheckpointServiceLike,
 } from '../src/routes/checkpoints.js';
@@ -113,14 +114,15 @@ afterEach(async () => {
   }
 });
 
-function mountApp(w: World, service: CheckpointServiceLike): Express {
+function mountAppWith(w: World, service: CheckpointServiceLike, builds: BuildRegistryLike): Express {
   const app = express();
   app.use(express.json());
-  app.use(
-    '/api/builds',
-    createCheckpointsRouter({ sitesRoot: w.sitesRoot, builds: w.orchestrator, service, hub: w.hub }),
-  );
+  app.use('/api/builds', createCheckpointsRouter({ sitesRoot: w.sitesRoot, builds, service, hub: w.hub }));
   return app;
+}
+
+function mountApp(w: World, service: CheckpointServiceLike): Express {
+  return mountAppWith(w, service, w.orchestrator);
 }
 
 async function withServer(app: Express, fn: (base: string) => Promise<void>): Promise<void> {
@@ -293,6 +295,98 @@ describe('checkpoints api', () => {
       w.orchestrator.cancel(id);
       await w.orchestrator.whenSettled(id);
     }
+  });
+
+  it('restore waits for the drive to settle, then re-checks and 409s if the build became active', { timeout: 30_000 }, async () => {
+    const w = await world();
+    const service = new FsCheckpointService(path.join(w.dir, 'checkpoints'));
+    const id = await driveToDone(w);
+    await service.snapshot(w.sitesRoot, id, 'initial build');
+
+    // Registry seam: the phase flips to an active one while the restore is
+    // parked on the settle, so the post-settle re-check must be what refuses.
+    let phase = 'DONE';
+    let settleCalls = 0;
+    let restoreCalls = 0;
+    let releaseSettle: () => void = () => undefined;
+    const settled = new Promise<void>((resolve) => {
+      releaseSettle = resolve;
+    });
+    const builds: BuildRegistryLike = {
+      get: (buildId) => (buildId === id ? { phase } : w.orchestrator.get(buildId)),
+      whenSettled: async () => {
+        settleCalls += 1;
+        await settled;
+      },
+    };
+    const spyingService: CheckpointServiceLike = {
+      list: (root, buildId) => service.list(root, buildId),
+      restore: async (root, buildId, n) => {
+        restoreCalls += 1;
+        return service.restore(root, buildId, n);
+      },
+    };
+
+    await withServer(mountAppWith(w, spyingService, builds), async (base) => {
+      const pending = fetch(`${base}/api/builds/${id}/checkpoints/1/restore`, { method: 'POST' });
+      await waitFor(() => settleCalls === 1, 'restore parked on the settle');
+      phase = 'EDITING';
+      releaseSettle();
+      const res = await pending;
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toContain('editing');
+    });
+    expect(restoreCalls).toBe(0);
+  });
+
+  it('restore rescans the registry so the build record reflects the restored files', { timeout: 30_000 }, async () => {
+    const w = await world();
+    const service = new FsCheckpointService(path.join(w.dir, 'checkpoints'));
+    const id = await driveToDone(w);
+    const originalFiles = (await listSiteFiles(w.sitesRoot, id)).map((e) => e.path);
+    const snap = await service.snapshot(w.sitesRoot, id, 'initial build');
+    await writeSiteFile(w.sitesRoot, id, 'extra.css', '/* added after the snapshot */\n');
+
+    const rescans: string[] = [];
+    const rescanResults: string[][] = [];
+    const builds: BuildRegistryLike = {
+      get: (buildId) => w.orchestrator.get(buildId),
+      // Stand-in for the orchestrator's rescanFiles: captures the live list
+      // at call time so the test sees what the rescan observed.
+      rescanFiles: async (buildId) => {
+        rescans.push(buildId);
+        const live = (await listSiteFiles(w.sitesRoot, buildId)).map((e) => e.path);
+        rescanResults.push(live);
+        return live;
+      },
+    };
+
+    await withServer(mountAppWith(w, service, builds), async (base) => {
+      const res = await fetch(`${base}/api/builds/${id}/checkpoints/${snap.n}/restore`, { method: 'POST' });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { ok: boolean }).ok).toBe(true);
+    });
+    // Called once, with the restored id, after the files were swapped back:
+    // the observed live list is the snapshot's, without the post-snapshot file.
+    expect(rescans).toEqual([id]);
+    expect(rescanResults[0]).toEqual(originalFiles);
+  });
+
+  it('restore emits a restored event in addition to the phase event', { timeout: 30_000 }, async () => {
+    const w = await world();
+    const service = new FsCheckpointService(path.join(w.dir, 'checkpoints'));
+    const id = await driveToDone(w);
+    const snap = await service.snapshot(w.sitesRoot, id, 'initial build');
+
+    const eventsBefore = eventsFor(w.events, id).length;
+    await withServer(mountApp(w, service), async (base) => {
+      const res = await fetch(`${base}/api/builds/${id}/checkpoints/${snap.n}/restore`, { method: 'POST' });
+      expect(res.status).toBe(200);
+    });
+
+    const fresh = eventsFor(w.events, id).slice(eventsBefore);
+    expect(fresh.filter((e) => e.type === 'restored')).toEqual([{ type: 'restored', id, checkpoint: snap.n }]);
+    expect(fresh.some((e) => e.type === 'phase' && e.phase === 'DONE')).toBe(true);
   });
 });
 

@@ -3,6 +3,7 @@ import type { ChatMessage, Provider } from './provider.js';
 import {
   executeFsTool,
   extractToolCalls,
+  findWriteFilePayloads,
   isFsTool,
   isKnownTool,
   validateAskArgs,
@@ -47,6 +48,8 @@ export interface RuntimeDeps {
 export interface RunOptions {
   signal?: AbortSignal;
   maxIterations?: number;
+  /** Transcript size budget in chars; older payloads are compacted past it. */
+  maxTranscriptChars?: number;
   onEvent?: (event: AgentEvent) => void;
 }
 
@@ -56,6 +59,67 @@ export interface Runtime {
 
 const DEFAULT_MAX_ITERATIONS = 12;
 const REPEAT_LIMIT = 3;
+const DEFAULT_MAX_TRANSCRIPT_CHARS = 120_000;
+// The live exchange at the tail (the assistant turn being acted on plus its
+// tool results) is never compacted; neither are system or user messages.
+const COMPACTION_TAIL = 2;
+
+/**
+ * Bounds transcript growth across a run. Assistant messages embed full
+ * writeFile payloads (up to 256KB each) and are re-sent whole every turn, so
+ * large builds blew the model context mid-build. Two passes, both limited to
+ * messages older than the last COMPACTION_TAIL and never touching system or
+ * user messages: (1) stub writeFile args.content in older assistant messages
+ * in place, keeping the JSON shape; (2) if the transcript still exceeds
+ * maxChars, tombstone the oldest assistant/tool payloads until it fits (best
+ * effort; the protected tail itself may exceed the budget). Returns how many
+ * payloads were stubbed and dropped.
+ */
+export function compactTranscript(
+  messages: ChatMessage[],
+  maxChars: number,
+): { stubbed: number; dropped: number } {
+  const tailStart = Math.max(0, messages.length - COMPACTION_TAIL);
+  let stubbed = 0;
+  for (let i = 0; i < tailStart; i += 1) {
+    const m = messages[i]!;
+    if (m.role !== 'assistant' || !m.content.includes('"tool"')) continue;
+    const replacements: Array<{ start: number; end: number; text: string }> = [];
+    for (const p of findWriteFilePayloads(m.content)) {
+      const original = p.args.content;
+      if (typeof original !== 'string' || original.startsWith('<written: ')) continue;
+      const args = { ...p.args, content: `<written: ${p.path} (${p.chars} chars)>` };
+      replacements.push({ start: p.start, end: p.end, text: JSON.stringify({ tool: 'writeFile', args }) });
+    }
+    if (replacements.length === 0) continue;
+    let next = '';
+    let cursor = 0;
+    for (const r of replacements) {
+      next += m.content.slice(cursor, r.start) + r.text;
+      cursor = r.end;
+    }
+    m.content = next + m.content.slice(cursor);
+    stubbed += replacements.length;
+  }
+
+  let total = 0;
+  for (const m of messages) total += m.content.length;
+  let dropped = 0;
+  for (let i = 0; i < tailStart && total > maxChars; i += 1) {
+    const m = messages[i]!;
+    if (m.role !== 'assistant' && m.role !== 'tool') continue;
+    const len = m.content.length;
+    const tag = m.role === 'tool' ? (m.content.match(/^\[[^\]]{1,40}\]/)?.[0] ?? null) : null;
+    const tombstone = tag !== null
+      ? `<dropped: ${tag} result (${len} chars)>`
+      : `<dropped: ${m.role} payload (${len} chars)>`;
+    if (tombstone.length >= len) continue;
+    m.content = tombstone;
+    total -= len - tombstone.length;
+    dropped += 1;
+  }
+  return { stubbed, dropped };
+}
 
 function raceAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return p;
@@ -74,14 +138,24 @@ function raceAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
  * the confined store, and appends results as tool-role messages. Control
  * tools (ask/plan) end the run with an awaiting status so the orchestrator
  * can collect user input and resume with the same transcript; finish ends it
- * for good. Aborts reject with an AbortError.
+ * for good. After each tool result is appended the transcript is compacted
+ * (older writeFile payloads stubbed, total chars capped) so large builds do
+ * not outgrow the model context. Aborts reject with an AbortError.
  */
 export function createRuntime(deps: RuntimeDeps): Runtime {
   async function run(messages: ChatMessage[], opts: RunOptions = {}): Promise<RunResult> {
     const maxIterations = opts.maxIterations ?? DEFAULT_MAX_ITERATIONS;
+    const maxTranscriptChars = opts.maxTranscriptChars ?? DEFAULT_MAX_TRANSCRIPT_CHARS;
     const emit = (event: AgentEvent): void => {
       opts.onEvent?.(event);
     };
+    const compact = (): void => {
+      const { dropped } = compactTranscript(messages, maxTranscriptChars);
+      if (dropped > 0) {
+        emit({ type: 'note', message: `transcript exceeded ${maxTranscriptChars} chars; dropped ${dropped} older payload(s)` });
+      }
+    };
+    compact();
     const callProvider = async (): Promise<string> => {
       try {
         return await raceAbort(deps.provider.complete(messages, { signal: opts.signal }), opts.signal);
@@ -146,6 +220,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
       for (const call of calls) {
         const fail = (result: string): void => {
           messages.push({ role: 'tool', content: `[${call.name}] ${result}` });
+          compact();
           emit({ type: 'tool', name: call.name, args: call.args, result });
         };
         if (!isKnownTool(call.name)) {
@@ -155,6 +230,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
         if (isFsTool(call.name)) {
           const result = await executeFsTool(deps.store, call);
           messages.push({ role: 'tool', content: `[${call.name}] ${result}` });
+          compact();
           emit({ type: 'tool', name: call.name, args: call.args, result });
           continue;
         }

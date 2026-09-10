@@ -23,7 +23,7 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...patched, default: patched };
 });
 
-const PREVIEW_CSP = "default-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:";
+const PREVIEW_CSP = "default-src 'self' 'unsafe-inline'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com";
 const SITE_ID = 'share-test-site';
 const HTTPS_PORT = 8443;
 const SITE_HTML =
@@ -178,7 +178,7 @@ describe('share api', () => {
       expect(res.status).toBe(200);
       const body = (await res.json()) as { shareUrl: string; lanUrl: string };
       expect(body.shareUrl).toBe(`/p/${SITE_ID}/`);
-      expect(body.lanUrl).toBe(`http://192.168.1.50:${HTTPS_PORT}/p/${SITE_ID}/`);
+      expect(body.lanUrl).toBe(`https://192.168.1.50:${HTTPS_PORT}/p/${SITE_ID}/`);
     });
   });
 
